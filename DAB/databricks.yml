@@ -1,0 +1,52 @@
+bundle:
+  name: databricks-cicd-bundle-poc
+
+variables:
+  job_name:
+    default: hello-bundle-job
+  environment:
+    default: dev
+  pipeline_name:
+    default: sample-pipeline
+
+resources:
+  jobs:
+    hello_bundle_job:
+      name: ${var.job_name}
+      tasks:
+        - task_key: hello_task
+          notebook_task:
+            notebook_path: ./notebooks/hello_bundle.py
+            base_parameters:
+              environment: ${var.environment}
+      schedule:
+        quartz_cron_expression: "0 0 8 * * ?"
+        timezone_id: "UTC"
+
+  pipelines:
+    sample_pipeline:
+      name: ${var.pipeline_name}
+      catalog: workspace
+      schema: default
+      serverless: true
+      continuous: false
+      development: false
+      libraries:
+        - glob:
+            include: ./pipeline/transformations/**
+
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      job_name: dev-job
+      environment: dev
+      pipeline_name: dev-pipeline
+
+  uat:
+    mode: production
+    variables:
+      job_name: uat-job
+      environment: uat
+      pipeline_name: uat-pipeline
