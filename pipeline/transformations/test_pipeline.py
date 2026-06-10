@@ -5,3 +5,4 @@ spark = SparkSession.getActiveSession()
 
 @dp.table
 def sample_aggregation_jun_10_redeploy_test():
+    return spark.range(10)

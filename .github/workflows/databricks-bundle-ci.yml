@@ -17,18 +17,16 @@ jobs:
       - name: Install Databricks CLI
         uses: databricks/setup-cli@main
 
+      - name: Check Python syntax
+        run: |
+          python -m py_compile notebooks/hello_bundle.py pipeline/transformations/test_pipeline.py
+
       - name: Validate Databricks bundle
         env:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: |
           databricks bundle validate --target dev
-      
-      - name: Test secret masking
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-        run: |
-          echo "$DATABRICKS_HOST"
 
       - name: Deploy Databricks bundle to DEV
         env:
