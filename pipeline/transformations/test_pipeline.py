@@ -4,5 +4,4 @@ from pyspark.sql import SparkSession
 spark = SparkSession.getActiveSession()
 
 @dp.table
-def test_table():
-    return spark.range(10)
+def sample_aggregation_jun_10_redeploy_test():

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  validate-bundle:
+  Deploy Bundle:
     runs-on: ubuntu-latest
 
     steps:
