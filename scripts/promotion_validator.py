@@ -14,7 +14,8 @@ VALID_OPERATION_STATUSES = {"SUCCESS", "FAILED"}
 DECISION_PROMOTION_VALID = "PROMOTION_VALID"
 DECISION_PREVIOUS_MANIFEST_NOT_FOUND = "PREVIOUS_DEPLOYMENT_MANIFEST_NOT_FOUND"
 DECISION_PREVIOUS_DEPLOYMENT_NOT_SUCCESSFUL = "PREVIOUS_DEPLOYMENT_NOT_SUCCESSFUL"
-DECISION_COMMIT_SHA_MISMATCH = "COMMIT_SHA_MISMATCH"
+DECISION_RELEASE_ID_MISMATCH = "RELEASE_ID_MISMATCH"
+DECISION_ARTIFACT_HASH_MISMATCH = "ARTIFACT_HASH_MISMATCH"
 DECISION_INVALID_MANIFEST_SCHEMA = "INVALID_MANIFEST_SCHEMA"
 DECISION_INVALID_PROMOTION_SEQUENCE = "INVALID_PROMOTION_SEQUENCE"
 DECISION_WORKSPACE_TARGET_MISMATCH = "WORKSPACE_TARGET_MISMATCH"
@@ -41,7 +42,7 @@ def previous_environment_for(target_environment):
     if target_environment == "prod":
         return "uat"
     return None
-    
+
 
 def default_previous_manifest_path(target_environment):
     previous_environment = previous_environment_for(target_environment)
@@ -50,6 +51,7 @@ def default_previous_manifest_path(target_environment):
         return None
 
     return f"{previous_environment}-deployment-manifest.json"
+
 
 def default_output_path(target_environment):
     return f"{target_environment}-promotion-validation-result.json"
@@ -68,7 +70,8 @@ def build_result(
     decision,
     valid,
     target_environment,
-    current_commit_sha,
+    release_id,
+    artifact_hash,
     previous_environment,
     previous_manifest_path,
     message,
@@ -80,7 +83,8 @@ def build_result(
         "decision": decision,
         "valid": valid,
         "target_environment": target_environment,
-        "current_commit_sha": current_commit_sha,
+        "release_id": release_id,
+        "artifact_hash": artifact_hash,
         "previous_environment": previous_environment,
         "previous_manifest_path": str(previous_manifest_path) if previous_manifest_path else None,
         "message": message,
@@ -129,6 +133,7 @@ def validate_required_top_level_fields(manifest):
     required_top_level_fields = [
         "schema_version",
         "deployment_id",
+        "release",
         "environment",
         "promotion",
         "bundle",
@@ -147,6 +152,7 @@ def validate_required_top_level_fields(manifest):
 
 def validate_required_section_types(manifest):
     required_object_sections = [
+        "release",
         "promotion",
         "bundle",
         "git",
@@ -187,6 +193,9 @@ def validate_manifest_schema(manifest):
     required_string_fields = [
         ("schema_version",),
         ("deployment_id",),
+        ("release", "release_id"),
+        ("release", "artifact_name"),
+        ("release", "artifact_hash"),
         ("environment",),
         ("bundle", "target"),
         ("git", "commit_sha"),
@@ -222,7 +231,7 @@ def validate_manifest_schema(manifest):
     return True, "Manifest schema is valid"
 
 
-def validate_promotion(target_environment, current_commit_sha, previous_manifest_path):
+def validate_promotion(target_environment, release_id, artifact_hash, previous_manifest_path):
     checks = []
     previous_environment = previous_environment_for(target_environment)
 
@@ -231,7 +240,8 @@ def validate_promotion(target_environment, current_commit_sha, previous_manifest
             decision=DECISION_INVALID_PROMOTION_SEQUENCE,
             valid=False,
             target_environment=target_environment,
-            current_commit_sha=current_commit_sha,
+            release_id=release_id,
+            artifact_hash=artifact_hash,
             previous_environment=None,
             previous_manifest_path=previous_manifest_path,
             message="Invalid target environment.",
@@ -250,7 +260,8 @@ def validate_promotion(target_environment, current_commit_sha, previous_manifest
             decision=DECISION_PROMOTION_VALID,
             valid=True,
             target_environment=target_environment,
-            current_commit_sha=current_commit_sha,
+            release_id=release_id,
+            artifact_hash=artifact_hash,
             previous_environment=None,
             previous_manifest_path=None,
             message="DEV promotion is valid. No previous deployment manifest is required.",
@@ -280,7 +291,8 @@ def validate_promotion(target_environment, current_commit_sha, previous_manifest
             decision=DECISION_PREVIOUS_MANIFEST_NOT_FOUND,
             valid=False,
             target_environment=target_environment,
-            current_commit_sha=current_commit_sha,
+            release_id=release_id,
+            artifact_hash=artifact_hash,
             previous_environment=previous_environment,
             previous_manifest_path=previous_manifest_path,
             message="Previous deployment manifest was not found.",
@@ -312,7 +324,8 @@ def validate_promotion(target_environment, current_commit_sha, previous_manifest
             decision=DECISION_INVALID_MANIFEST_SCHEMA,
             valid=False,
             target_environment=target_environment,
-            current_commit_sha=current_commit_sha,
+            release_id=release_id,
+            artifact_hash=artifact_hash,
             previous_environment=previous_environment,
             previous_manifest_path=previous_manifest_path,
             message="Previous deployment manifest could not be parsed.",
@@ -344,7 +357,8 @@ def validate_promotion(target_environment, current_commit_sha, previous_manifest
             decision=DECISION_INVALID_MANIFEST_SCHEMA,
             valid=False,
             target_environment=target_environment,
-            current_commit_sha=current_commit_sha,
+            release_id=release_id,
+            artifact_hash=artifact_hash,
             previous_environment=previous_environment,
             previous_manifest_path=previous_manifest_path,
             message="Previous deployment manifest schema is invalid.",
@@ -376,7 +390,8 @@ def validate_promotion(target_environment, current_commit_sha, previous_manifest
             decision=DECISION_PREVIOUS_ENVIRONMENT_MISMATCH,
             valid=False,
             target_environment=target_environment,
-            current_commit_sha=current_commit_sha,
+            release_id=release_id,
+            artifact_hash=artifact_hash,
             previous_environment=previous_environment,
             previous_manifest_path=previous_manifest_path,
             message="Previous deployment manifest environment does not match expected previous environment.",
@@ -408,7 +423,8 @@ def validate_promotion(target_environment, current_commit_sha, previous_manifest
             decision=DECISION_PREVIOUS_DEPLOYMENT_NOT_SUCCESSFUL,
             valid=False,
             target_environment=target_environment,
-            current_commit_sha=current_commit_sha,
+            release_id=release_id,
+            artifact_hash=artifact_hash,
             previous_environment=previous_environment,
             previous_manifest_path=previous_manifest_path,
             message="Previous deployment was not successful.",
@@ -424,35 +440,69 @@ def validate_promotion(target_environment, current_commit_sha, previous_manifest
         )
     )
 
-    previous_commit_sha = manifest["git"]["commit_sha"]
+    previous_release_id = manifest["release"]["release_id"]
 
-    if previous_commit_sha != current_commit_sha:
+    if previous_release_id != release_id:
         checks.append(
             build_check(
-                "commit_sha_matches",
+                "release_id_matches",
                 "FAIL",
-                current_commit_sha,
-                previous_commit_sha,
+                release_id,
+                previous_release_id,
             )
         )
 
         return build_result(
-            decision=DECISION_COMMIT_SHA_MISMATCH,
+            decision=DECISION_RELEASE_ID_MISMATCH,
             valid=False,
             target_environment=target_environment,
-            current_commit_sha=current_commit_sha,
+            release_id=release_id,
+            artifact_hash=artifact_hash,
             previous_environment=previous_environment,
             previous_manifest_path=previous_manifest_path,
-            message="Previous deployment commit SHA does not match current commit SHA.",
+            message="Previous deployment release ID does not match requested release ID.",
             checks=checks,
         )
 
     checks.append(
         build_check(
-            "commit_sha_matches",
+            "release_id_matches",
             "PASS",
-            current_commit_sha,
-            previous_commit_sha,
+            release_id,
+            previous_release_id,
+        )
+    )
+
+    previous_artifact_hash = manifest["release"]["artifact_hash"]
+
+    if previous_artifact_hash != artifact_hash:
+        checks.append(
+            build_check(
+                "artifact_hash_matches",
+                "FAIL",
+                artifact_hash,
+                previous_artifact_hash,
+            )
+        )
+
+        return build_result(
+            decision=DECISION_ARTIFACT_HASH_MISMATCH,
+            valid=False,
+            target_environment=target_environment,
+            release_id=release_id,
+            artifact_hash=artifact_hash,
+            previous_environment=previous_environment,
+            previous_manifest_path=previous_manifest_path,
+            message="Previous deployment artifact hash does not match requested artifact hash.",
+            checks=checks,
+        )
+
+    checks.append(
+        build_check(
+            "artifact_hash_matches",
+            "PASS",
+            artifact_hash,
+            previous_artifact_hash,
         )
     )
 
@@ -472,7 +522,8 @@ def validate_promotion(target_environment, current_commit_sha, previous_manifest
             decision=DECISION_WORKSPACE_TARGET_MISMATCH,
             valid=False,
             target_environment=target_environment,
-            current_commit_sha=current_commit_sha,
+            release_id=release_id,
+            artifact_hash=artifact_hash,
             previous_environment=previous_environment,
             previous_manifest_path=previous_manifest_path,
             message="Previous deployment workspace target does not match expected environment.",
@@ -504,7 +555,8 @@ def validate_promotion(target_environment, current_commit_sha, previous_manifest
             decision=DECISION_BUNDLE_TARGET_MISMATCH,
             valid=False,
             target_environment=target_environment,
-            current_commit_sha=current_commit_sha,
+            release_id=release_id,
+            artifact_hash=artifact_hash,
             previous_environment=previous_environment,
             previous_manifest_path=previous_manifest_path,
             message="Previous deployment bundle target does not match expected environment.",
@@ -524,7 +576,8 @@ def validate_promotion(target_environment, current_commit_sha, previous_manifest
         decision=DECISION_PROMOTION_VALID,
         valid=True,
         target_environment=target_environment,
-        current_commit_sha=current_commit_sha,
+        release_id=release_id,
+        artifact_hash=artifact_hash,
         previous_environment=previous_environment,
         previous_manifest_path=previous_manifest_path,
         message="Promotion validation passed.",
@@ -534,7 +587,7 @@ def validate_promotion(target_environment, current_commit_sha, previous_manifest
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Validate Databricks deployment promotion prerequisites."
+        description="Validate Databricks release promotion prerequisites."
     )
 
     parser.add_argument(
@@ -544,9 +597,15 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--current-commit-sha",
+        "--release-id",
         required=True,
-        help="Current Git commit SHA being promoted.",
+        help="Immutable release ID being promoted.",
+    )
+
+    parser.add_argument(
+        "--artifact-hash",
+        required=True,
+        help="Hash of the immutable release artifact being promoted.",
     )
 
     parser.add_argument(
@@ -570,23 +629,39 @@ def main():
 
     output_path = args.output_path or default_output_path(target_environment)
 
-    if not is_non_empty_string(args.current_commit_sha):
+    input_checks = []
+
+    if not is_non_empty_string(args.release_id):
+        input_checks.append(
+            build_check(
+                "release_id_is_valid",
+                "FAIL",
+                "non-empty string",
+                args.release_id,
+            )
+        )
+
+    if not is_non_empty_string(args.artifact_hash):
+        input_checks.append(
+            build_check(
+                "artifact_hash_is_valid",
+                "FAIL",
+                "non-empty string",
+                args.artifact_hash,
+            )
+        )
+
+    if input_checks:
         result = build_result(
             decision=DECISION_INVALID_PROMOTION_SEQUENCE,
             valid=False,
             target_environment=target_environment,
-            current_commit_sha=args.current_commit_sha,
+            release_id=args.release_id,
+            artifact_hash=args.artifact_hash,
             previous_environment=previous_environment_for(target_environment),
             previous_manifest_path=args.previous_manifest_path,
-            message="Current commit SHA must be a non-empty string.",
-            checks=[
-                build_check(
-                    "current_commit_sha_is_valid",
-                    "FAIL",
-                    "non-empty string",
-                    args.current_commit_sha,
-                )
-            ],
+            message="Release ID and artifact hash must be non-empty strings.",
+            checks=input_checks,
         )
 
         write_json_atomic(output_path, result)
@@ -600,7 +675,8 @@ def main():
 
     result = validate_promotion(
         target_environment=target_environment,
-        current_commit_sha=args.current_commit_sha,
+        release_id=args.release_id,
+        artifact_hash=args.artifact_hash,
         previous_manifest_path=previous_manifest_path,
     )
 

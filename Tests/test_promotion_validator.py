@@ -26,6 +26,19 @@ def get_validator_script():
 
 SCRIPT = get_validator_script()
 
+VALID_RELEASE_ID = "rc-20260624-123456789"
+VALID_ARTIFACT_HASH = "sha256:abc123def456"
+
+
+def release_args(
+    release_id=VALID_RELEASE_ID,
+    artifact_hash=VALID_ARTIFACT_HASH,
+):
+    return [
+        "--release-id", release_id,
+        "--artifact-hash", artifact_hash,
+    ]
+
 
 def write_json(path: Path, data: dict):
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -34,7 +47,9 @@ def write_json(path: Path, data: dict):
 def valid_manifest(
     *,
     environment="dev",
-    commit_sha="abc123",
+    release_id="rc-20260624-123456789",
+    artifact_name=None,
+    artifact_hash="sha256:abc123def456",
     operation_status="SUCCESS",
     workspace_target=None,
     bundle_target=None,
@@ -44,6 +59,11 @@ def valid_manifest(
         "schema_version": schema_version,
         "environment": environment,
         "deployment_id": f"github-run-123-{environment}",
+        "release": {
+            "release_id": release_id,
+            "artifact_name": artifact_name or f"{release_id}.zip",
+            "artifact_hash": artifact_hash,
+        },
         "promotion": {
             "from_environment": None if environment == "dev" else "dev",
             "to_environment": environment,
@@ -57,7 +77,7 @@ def valid_manifest(
             "repository": "mashhood/databricks-cicd",
             "source_branch": environment,
             "target_branch": environment,
-            "commit_sha": commit_sha,
+            "commit_sha": "abc123",
             "commit_message": "test commit",
             "actor": "mashhoodhamid201",
         },
@@ -109,23 +129,23 @@ def test_dev_promotion_valid(tmp_path):
     result, output = run_validator(
         tmp_path,
         "--target-environment", "dev",
-        "--current-commit-sha", "abc123",
+        *release_args(),
     )
 
     assert result.returncode == 0
     assert_decision(output, "PROMOTION_VALID")
 
 
-def test_uat_promotion_valid_with_inferred_manifest(tmp_path):
+def test_valid_uat_promotion_release_identity_matches(tmp_path):
     write_json(
         tmp_path / "dev-deployment-manifest.json",
-        valid_manifest(environment="dev", commit_sha="abc123"),
+        valid_manifest(environment="dev"),
     )
 
     result, output = run_validator(
         tmp_path,
         "--target-environment", "uat",
-        "--current-commit-sha", "abc123",
+        *release_args(),
     )
 
     assert result.returncode == 0
@@ -134,16 +154,16 @@ def test_uat_promotion_valid_with_inferred_manifest(tmp_path):
     assert output["previous_manifest_path"] == "dev-deployment-manifest.json"
 
 
-def test_prod_promotion_valid_with_inferred_manifest(tmp_path):
+def test_valid_prod_promotion_release_identity_matches(tmp_path):
     write_json(
         tmp_path / "uat-deployment-manifest.json",
-        valid_manifest(environment="uat", commit_sha="abc123"),
+        valid_manifest(environment="uat"),
     )
 
     result, output = run_validator(
         tmp_path,
         "--target-environment", "prod",
-        "--current-commit-sha", "abc123",
+        *release_args(),
     )
 
     assert result.returncode == 0
@@ -156,7 +176,7 @@ def test_missing_previous_manifest(tmp_path):
     result, output = run_validator(
         tmp_path,
         "--target-environment", "uat",
-        "--current-commit-sha", "abc123",
+        *release_args(),
     )
 
     assert result.returncode != 0
@@ -165,7 +185,6 @@ def test_missing_previous_manifest(tmp_path):
 def test_previous_environment_mismatch(tmp_path):
     manifest = valid_manifest(
         environment="dev",
-        commit_sha="abc123",
         workspace_target="dev",
         bundle_target="dev",
     )
@@ -180,7 +199,7 @@ def test_previous_environment_mismatch(tmp_path):
     result, output = run_validator(
         tmp_path,
         "--target-environment", "uat",
-        "--current-commit-sha", "abc123",
+        *release_args(),
     )
 
     assert result.returncode != 0
@@ -205,27 +224,43 @@ def test_previous_deployment_failed(tmp_path):
     result, output = run_validator(
         tmp_path,
         "--target-environment", "uat",
-        "--current-commit-sha", "abc123",
+        *release_args(),
     )
 
     assert result.returncode != 0
     assert_decision(output, "PREVIOUS_DEPLOYMENT_NOT_SUCCESSFUL")
 
 
-def test_commit_sha_mismatch(tmp_path):
+def test_release_id_mismatch(tmp_path):
     write_json(
         tmp_path / "dev-deployment-manifest.json",
-        valid_manifest(environment="dev", commit_sha="old456"),
+        valid_manifest(environment="dev", release_id="rc-old-release"),
     )
 
     result, output = run_validator(
         tmp_path,
         "--target-environment", "uat",
-        "--current-commit-sha", "abc123",
+        *release_args(),
     )
 
     assert result.returncode != 0
-    assert_decision(output, "COMMIT_SHA_MISMATCH")
+    assert_decision(output, "RELEASE_ID_MISMATCH")
+
+
+def test_artifact_hash_mismatch(tmp_path):
+    write_json(
+        tmp_path / "dev-deployment-manifest.json",
+        valid_manifest(environment="dev", artifact_hash="sha256:old456"),
+    )
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "ARTIFACT_HASH_MISMATCH")
 
 
 def test_workspace_target_mismatch(tmp_path):
@@ -237,7 +272,7 @@ def test_workspace_target_mismatch(tmp_path):
     result, output = run_validator(
         tmp_path,
         "--target-environment", "uat",
-        "--current-commit-sha", "abc123",
+        *release_args(),
     )
 
     assert result.returncode != 0
@@ -253,7 +288,7 @@ def test_bundle_target_mismatch(tmp_path):
     result, output = run_validator(
         tmp_path,
         "--target-environment", "uat",
-        "--current-commit-sha", "abc123",
+        *release_args(),
     )
 
     assert result.returncode != 0
@@ -269,23 +304,7 @@ def test_invalid_schema_version(tmp_path):
     result, output = run_validator(
         tmp_path,
         "--target-environment", "uat",
-        "--current-commit-sha", "abc123",
-    )
-
-    assert result.returncode != 0
-    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
-
-
-def test_empty_commit_sha_is_invalid_schema(tmp_path):
-    manifest = valid_manifest(environment="dev")
-    manifest["git"]["commit_sha"] = ""
-
-    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
-
-    result, output = run_validator(
-        tmp_path,
-        "--target-environment", "uat",
-        "--current-commit-sha", "abc123",
+        *release_args(),
     )
 
     assert result.returncode != 0
@@ -301,8 +320,111 @@ def test_invalid_json_manifest(tmp_path):
     result, output = run_validator(
         tmp_path,
         "--target-environment", "uat",
-        "--current-commit-sha", "abc123",
+        *release_args(),
     )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+def test_missing_release_section_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    del manifest["release"]
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_release_section_not_object_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["release"] = "not-an-object"
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_missing_release_id_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    del manifest["release"]["release_id"]
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(tmp_path, "--target-environment", "uat", *release_args())
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_missing_artifact_name_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    del manifest["release"]["artifact_name"]
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(tmp_path, "--target-environment", "uat", *release_args())
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_missing_artifact_hash_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    del manifest["release"]["artifact_hash"]
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(tmp_path, "--target-environment", "uat", *release_args())
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_empty_release_id_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["release"]["release_id"] = ""
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(tmp_path, "--target-environment", "uat", *release_args())
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_empty_artifact_name_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["release"]["artifact_name"] = ""
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(tmp_path, "--target-environment", "uat", *release_args())
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_empty_artifact_hash_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["release"]["artifact_hash"] = ""
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(tmp_path, "--target-environment", "uat", *release_args())
 
     assert result.returncode != 0
     assert_decision(output, "INVALID_MANIFEST_SCHEMA")
@@ -314,7 +436,7 @@ def test_empty_manifest_file(tmp_path):
     result, output = run_validator(
         tmp_path,
         "--target-environment", "uat",
-        "--current-commit-sha", "abc123",
+        *release_args(),
     )
 
     assert result.returncode != 0
@@ -330,7 +452,7 @@ def test_wrong_root_type_manifest(tmp_path):
     result, output = run_validator(
         tmp_path,
         "--target-environment", "uat",
-        "--current-commit-sha", "abc123",
+        *release_args(),
     )
 
     assert result.returncode != 0
@@ -340,13 +462,13 @@ def test_wrong_root_type_manifest(tmp_path):
 def test_manual_previous_manifest_override(tmp_path):
     write_json(
         tmp_path / "custom-dev-manifest.json",
-        valid_manifest(environment="dev", commit_sha="abc123"),
+        valid_manifest(environment="dev"),
     )
 
     result, output = run_validator(
         tmp_path,
         "--target-environment", "uat",
-        "--current-commit-sha", "abc123",
+        *release_args(),
         "--previous-manifest-path", "custom-dev-manifest.json",
     )
 
@@ -357,13 +479,13 @@ def test_manual_previous_manifest_override(tmp_path):
 def test_manual_output_path_override(tmp_path):
     write_json(
         tmp_path / "dev-deployment-manifest.json",
-        valid_manifest(environment="dev", commit_sha="abc123"),
+        valid_manifest(environment="dev"),
     )
 
     result, _ = run_validator(
         tmp_path,
         "--target-environment", "uat",
-        "--current-commit-sha", "abc123",
+        *release_args(),
         "--output-path", "custom-result.json",
     )
 
@@ -380,7 +502,7 @@ def test_default_dev_output_name(tmp_path):
     result, _ = run_validator(
         tmp_path,
         "--target-environment", "dev",
-        "--current-commit-sha", "abc123",
+        *release_args(),
     )
 
     assert result.returncode == 0
@@ -396,7 +518,7 @@ def test_default_uat_output_name(tmp_path):
     result, _ = run_validator(
         tmp_path,
         "--target-environment", "uat",
-        "--current-commit-sha", "abc123",
+        *release_args(),
     )
 
     assert result.returncode == 0
@@ -412,7 +534,7 @@ def test_default_prod_output_name(tmp_path):
     result, _ = run_validator(
         tmp_path,
         "--target-environment", "prod",
-        "--current-commit-sha", "abc123",
+        *release_args(),
     )
 
     assert result.returncode == 0

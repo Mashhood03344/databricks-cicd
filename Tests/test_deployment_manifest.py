@@ -19,6 +19,12 @@ from deployment_manifest import build_manifest
 
 def make_args(environment="dev", bundle_target="dev", workspace_target="dev"):
     return Namespace(
+
+        deployment_id="github-run-123456789-dev",
+        release_id="rc-20260624-123456789",
+        artifact_name="rc-20260624-123456789.zip",
+        artifact_hash="sha256:abc123def456",
+        
         environment=environment,
         bundle_name="databricks-cicd-bundle-poc",
         bundle_target=bundle_target,
@@ -85,12 +91,6 @@ def test_completed_at_is_populated_and_ends_with_z():
     assert manifest["operation"]["completed_at"].endswith("Z")
 
 
-def test_deployment_id_format():
-    manifest = build_manifest(make_args("dev"))
-
-    assert manifest["deployment_id"] == "github-run-123456789-dev"
-
-
 def test_operation_action_is_bundle_deploy():
     manifest = build_manifest(make_args())
 
@@ -128,6 +128,10 @@ def cli_args(environment="dev", output_path=None):
         "--started-at", "2026-06-12T10:00:00Z",
         "--github-run-id", "123456789",
         "--github-run-number", "42",
+        "--deployment-id", "github-run-123456789-dev",
+        "--release-id", "rc-20260624-123456789",
+        "--artifact-name", "rc-20260624-123456789.zip",
+        "--artifact-hash", "sha256:abc123def456"
     ]
 
     if output_path is not None:
@@ -271,6 +275,121 @@ def test_build_manifest_includes_evidence_storage():
     assert manifest["evidence_storage"]["artifact_generated_by_run_number"] == "42"
     assert manifest["evidence_storage"]["artifact_retention_days"] == 7
 
+def test_deployment_id_copied_exactly_from_args():
+    manifest = build_manifest(make_args())
+
+    assert (
+        manifest["deployment_id"]
+        == "github-run-123456789-dev"
+    )
+
+
+def test_build_manifest_contains_release_section():
+    manifest = build_manifest(make_args())
+
+    assert "release" in manifest
+
+
+def test_release_id_copied_exactly_from_args():
+    manifest = build_manifest(make_args())
+
+    assert (
+        manifest["release"]["release_id"]
+        == "rc-20260624-123456789"
+    )
+
+
+def test_artifact_name_copied_exactly_from_args():
+    manifest = build_manifest(make_args())
+
+    assert (
+        manifest["release"]["artifact_name"]
+        == "rc-20260624-123456789.zip"
+    )
+
+
+def test_artifact_hash_copied_exactly_from_args():
+    manifest = build_manifest(make_args())
+
+    assert (
+        manifest["release"]["artifact_hash"]
+        == "sha256:abc123def456"
+    )
+
+def test_deployment_id_required_when_missing(tmp_path):
+    args = cli_args(
+        environment="dev",
+        output_path=tmp_path / "dev-deployment-manifest.json",
+    )
+
+    deployment_id_index = args.index("--deployment-id")
+    del args[deployment_id_index:deployment_id_index + 2]
+
+    result = subprocess.run(args, capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert "deployment-id" in result.stderr.lower()
+
+
+def test_release_id_required_when_missing(tmp_path):
+    args = cli_args(
+        environment="dev",
+        output_path=tmp_path / "dev-deployment-manifest.json",
+    )
+
+    release_id_index = args.index("--release-id")
+    del args[release_id_index:release_id_index + 2]
+
+    result = subprocess.run(args, capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert "release-id" in result.stderr.lower()
+
+
+def test_artifact_name_required_when_missing(tmp_path):
+    args = cli_args(
+        environment="dev",
+        output_path=tmp_path / "dev-deployment-manifest.json",
+    )
+
+    artifact_name_index = args.index("--artifact-name")
+    del args[artifact_name_index:artifact_name_index + 2]
+
+    result = subprocess.run(args, capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert "artifact-name" in result.stderr.lower()
+
+
+def test_artifact_hash_required_when_missing(tmp_path):
+    args = cli_args(
+        environment="dev",
+        output_path=tmp_path / "dev-deployment-manifest.json",
+    )
+
+    artifact_hash_index = args.index("--artifact-hash")
+    del args[artifact_hash_index:artifact_hash_index + 2]
+
+    result = subprocess.run(args, capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert "artifact-hash" in result.stderr.lower()
+
+
+def test_cli_output_contains_release_metadata(tmp_path):
+    output_path = tmp_path / "dev-deployment-manifest.json"
+
+    result = run_script(output_path=output_path)
+
+    assert_success(result)
+
+    data = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert data["deployment_id"] == "github-run-123456789-dev"
+    assert data["release"]["release_id"] == "rc-20260624-123456789"
+    assert data["release"]["artifact_name"] == "rc-20260624-123456789.zip"
+    assert data["release"]["artifact_hash"] == "sha256:abc123def456"
+
 
 def test_cli_missing_required_args_fails_with_non_zero_exit_code(tmp_path):
     output_path = tmp_path / "dev-deployment-manifest.json"
@@ -307,6 +426,10 @@ def test_cli_invalid_environment_fails_with_non_zero_exit_code(tmp_path):
             "--github-run-id", "123456789",
             "--github-run-number", "42",
             "--output-path", str(output_path),
+            "--deployment-id", "github-run-123456789-dev",
+            "--release-id", "rc-20260624-123456789",
+            "--artifact-name", "rc-20260624-123456789.zip",
+            "--artifact-hash", "sha256:abc123def456",
         ],
         capture_output=True,
         text=True,
@@ -325,33 +448,3 @@ def test_cli_atomic_write_leaves_no_tmp_file_after_success(tmp_path):
     assert_success(result)
     assert output_path.exists()
     assert not tmp_file.exists()
-
-def run_script_for_environment(
-    environment,
-    cwd,
-    output_path=None,
-    include_github_run_id=True,
-    include_github_run_number=True,
-):
-    args = [
-        sys.executable,
-        str(SCRIPT_PATH),
-        "--environment", environment,
-        "--bundle-name", "databricks-cicd-bundle-poc",
-        "--bundle-target", environment,
-        "--workspace-target", environment,
-        "--workspace-root-path", f"/Workspace/Users/sp/.bundle/databricks-cicd-bundle-poc/{environment}",
-        "--authenticated-principal", f"sp-github-actions-dab-{environment}",
-        "--started-at", "2026-06-12T10:00:00Z",
-    ]
-
-    if include_github_run_id:
-        args.extend(["--github-run-id", "123456789"])
-
-    if include_github_run_number:
-        args.extend(["--github-run-number", "42"])
-
-    if output_path:
-        args.extend(["--output-path", str(output_path)])
-
-    return subprocess.run(args, cwd=cwd, capture_output=True, text=True)

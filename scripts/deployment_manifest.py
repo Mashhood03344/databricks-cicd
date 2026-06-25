@@ -25,13 +25,7 @@ def required_previous_environment(environment: str):
 
 
 def promotion_from_environment(environment: str):
-    if environment == "dev":
-        return None
-    if environment == "uat":
-        return "dev"
-    if environment == "prod":
-        return "uat"
-    raise ValueError(f"Unsupported environment: {environment}")
+    return required_previous_environment(environment)
 
 
 def default_output_path(environment: str) -> str:
@@ -49,7 +43,12 @@ def build_manifest(args):
 
     manifest = {
         "schema_version": "1.0",
-        "deployment_id": f"github-run-{args.github_run_id}-{environment}",
+        "deployment_id": args.deployment_id,
+        "release": {
+            "release_id": args.release_id,
+            "artifact_name": args.artifact_name,
+            "artifact_hash": args.artifact_hash,
+        },
         "environment": environment,
         "promotion": {
             "from_environment": promotion_from_environment(environment),
@@ -112,7 +111,14 @@ def parse_args():
     github_run_id = env("GITHUB_RUN_ID")
     github_run_number = env("GITHUB_RUN_NUMBER")
 
+    parser.add_argument("--deployment-id", required=True)
+
     parser.add_argument("--environment", required=True, help="Deployment environment: dev, uat, or prod")
+
+    parser.add_argument("--release-id", required=True)
+    parser.add_argument("--artifact-name", required=True)
+    parser.add_argument("--artifact-hash", required=True)
+
     parser.add_argument("--bundle-name", required=True)
     parser.add_argument("--bundle-target", required=True)
 
