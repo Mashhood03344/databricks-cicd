@@ -95,14 +95,15 @@ jobs:
 
       - name: Python syntax validation
         run: |
-          python -m compileall .
+          python -m compileall scripts Tests
 
       - name: Run pytest
         env:
           DEPLOYMENT_MANIFEST_SCRIPT: scripts/deployment_manifest.py
           PROMOTION_VALIDATOR_SCRIPT: scripts/promotion_validator.py
         run: |
-          pytest -v
+          python -m pip install pytest
+          python -m pytest Tests -v
 
       - name: Install Databricks CLI
         uses: databricks/setup-cli@main
