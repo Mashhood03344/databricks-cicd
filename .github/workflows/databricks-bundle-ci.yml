@@ -206,11 +206,13 @@ jobs:
         run: |
           ARTIFACT_HASH="sha256:$(sha256sum "${ARTIFACT_NAME}" | awk '{print $1}')"
 
+          echo "${ARTIFACT_HASH}" > .release-artifact-hash
           echo "artifact_hash=${ARTIFACT_HASH}" >> "$GITHUB_OUTPUT"
-          echo "ARTIFACT_HASH=${ARTIFACT_HASH}" >> "$GITHUB_ENV"
 
       - name: Generate external release_manifest.json
         run: |
+          ARTIFACT_HASH="$(cat .release-artifact-hash)"
+
           cat > release_manifest.json <<EOF
           {
             "schema_version": "1.0",
@@ -231,6 +233,37 @@ jobs:
             }
           }
           EOF
+
+      - name: Validate release manifest schema
+        run: |
+          validate_string_field() {
+            local field="$1"
+
+            test "$(jq -r "${field} | type" release_manifest.json)" = "string"
+            test "$(jq -r "${field}" release_manifest.json)" != ""
+          }
+
+          test "$(jq -r '.schema_version' release_manifest.json)" = "1.0"
+
+          required_fields=(
+            ".release.release_id"
+            ".release.artifact_name"
+            ".release.artifact_hash"
+            ".build.repository"
+            ".build.source_branch"
+            ".build.commit_sha"
+            ".build.workflow_name"
+            ".build.workflow_run_id"
+            ".build.workflow_run_number"
+            ".build.actor"
+            ".build.created_at_utc"
+          )
+
+          for field in "${required_fields[@]}"; do
+            validate_string_field "$field"
+          done
+
+          echo "Release manifest schema validation passed."
 
       - name: Verify release artifact hash
         run: |
