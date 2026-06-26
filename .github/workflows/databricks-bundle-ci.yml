@@ -106,14 +106,14 @@ jobs:
           PYTHONPATH: scripts
           DEPLOYMENT_MANIFEST_SCRIPT: scripts/deployment_manifest.py
         run: |
-          python -m pytest Tests -v
+          python -m pytest Tests/test_deployment_manifest.py -v
 
       - name: Run pytest for Promotion Validator
         env:
           PYTHONPATH: scripts
           PROMOTION_VALIDATOR_SCRIPT: scripts/promotion_validator.py
         run: |
-          python -m pytest Tests -v
+          python -m pytest Tests/test_promotion_validator.py -v
 
       - name: Install Databricks CLI
         uses: databricks/setup-cli@main
@@ -174,6 +174,28 @@ jobs:
             cp -R docs release-package/
           fi
 
+      - name: Generate release_manifest.json without artifact hash
+        run: |
+          cat > release-package/release_manifest.json <<EOF
+          {
+            "schema_version": "1.0",
+            "release": {
+              "release_id": "${RELEASE_ID}",
+              "artifact_name": "${ARTIFACT_NAME}"
+            },
+            "build": {
+              "repository": "${GITHUB_REPOSITORY}",
+              "source_branch": "${GITHUB_REF_NAME}",
+              "commit_sha": "${GITHUB_SHA}",
+              "workflow_name": "${GITHUB_WORKFLOW}",
+              "workflow_run_id": "${GITHUB_RUN_ID}",
+              "workflow_run_number": "${GITHUB_RUN_NUMBER}",
+              "actor": "${GITHUB_ACTOR}",
+              "created_at_utc": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            }
+          }
+          EOF
+
       - name: Create release artifact zip
         run: |
           cd release-package
@@ -187,7 +209,7 @@ jobs:
           echo "artifact_hash=${ARTIFACT_HASH}" >> "$GITHUB_OUTPUT"
           echo "ARTIFACT_HASH=${ARTIFACT_HASH}" >> "$GITHUB_ENV"
 
-      - name: Generate release_manifest.json
+      - name: Generate external release_manifest.json
         run: |
           cat > release_manifest.json <<EOF
           {
@@ -210,9 +232,18 @@ jobs:
           }
           EOF
 
-      - name: Add release manifest to zip
+      - name: Verify release artifact hash
         run: |
-          zip "${ARTIFACT_NAME}" release_manifest.json
+          MANIFEST_HASH="$(python -c "import json; print(json.load(open('release_manifest.json'))['release']['artifact_hash'])")"
+          COMPUTED_HASH="sha256:$(sha256sum "${ARTIFACT_NAME}" | awk '{print $1}')"
+
+          if [ "${MANIFEST_HASH}" != "${COMPUTED_HASH}" ]; then
+            echo "Release artifact hash verification failed."
+            echo "Manifest hash and computed artifact hash do not match."
+            exit 1
+          fi
+
+          echo "Release artifact hash verification passed."
 
       - name: Upload immutable release artifact
         uses: actions/upload-artifact@v4
