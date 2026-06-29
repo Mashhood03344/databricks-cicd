@@ -85,6 +85,10 @@ jobs:
         run: |
           python -m pytest Tests/test_ci_resolve_context.py -v
 
+      - name: Run pytest for CI Workflow Gating
+        run: |
+          python -m pytest Tests/test_ci_workflow_gating.py -v
+
       - name: Run pytest for Deployment Manifest
         env:
           PYTHONPATH: scripts
