@@ -28,36 +28,20 @@ jobs:
       should_build_release: ${{ steps.context.outputs.should_build_release }}
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Make CI helper scripts executable
+        run: |
+          chmod +x scripts/*.sh
+
       - name: Resolve branch context
         id: context
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
-            BRANCH="${{ github.base_ref }}"
-          else
-            BRANCH="${GITHUB_REF_NAME}"
-          fi
-
-          echo "Resolved branch: ${BRANCH}"
-
-          if [ "${BRANCH}" = "dev" ]; then
-            echo "bundle_target=dev" >> "$GITHUB_OUTPUT"
-            echo "github_environment=dev" >> "$GITHUB_OUTPUT"
-          elif [ "${BRANCH}" = "qa" ]; then
-            echo "bundle_target=uat" >> "$GITHUB_OUTPUT"
-            echo "github_environment=uat" >> "$GITHUB_OUTPUT"
-          elif [ "${BRANCH}" = "main" ]; then
-            echo "bundle_target=prod" >> "$GITHUB_OUTPUT"
-            echo "github_environment=prod" >> "$GITHUB_OUTPUT"
-          else
-            echo "Unsupported branch: ${BRANCH}"
-            exit 1
-          fi
-
-          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${BRANCH}" = "dev" ]; then
-            echo "should_build_release=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_build_release=false" >> "$GITHUB_OUTPUT"
-          fi
+          scripts/ci_resolve_context.sh \
+            "${GITHUB_EVENT_NAME}" \
+            "${{ github.base_ref }}" \
+            "${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
   validate:
     name: Validate Bundle
@@ -81,13 +65,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install pytest
-        run: |
-           python -m pip install pytest
-     
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip pytest
 
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
@@ -100,6 +80,10 @@ jobs:
       - name: Python syntax validation
         run: |
           python -m compileall scripts Tests
+
+      - name: Run pytest for CI Workflow Context
+        run: |
+          python -m pytest Tests/test_ci_resolve_context.py -v
 
       - name: Run pytest for Deployment Manifest
         env:
@@ -267,7 +251,7 @@ jobs:
 
       - name: Verify release artifact hash
         run: |
-          MANIFEST_HASH="$(python -c "import json; print(json.load(open('release_manifest.json'))['release']['artifact_hash'])")"
+          MANIFEST_HASH="$(jq -r '.release.artifact_hash' release_manifest.json)"
           COMPUTED_HASH="sha256:$(sha256sum "${ARTIFACT_NAME}" | awk '{print $1}')"
 
           if [ "${MANIFEST_HASH}" != "${COMPUTED_HASH}" ]; then
