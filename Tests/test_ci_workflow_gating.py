@@ -69,7 +69,51 @@ def test_release_artifact_upload_happens_after_hash_verification():
 
     assert hash_step_index < upload_step_index
 
+def test_workflow_calls_release_hash_verification_script():
+    workflow = read_workflow()
+    build_release = extract_job(workflow, "build-release")
 
+    assert "scripts/ci_verify_release_hash.sh release_manifest.json" in build_release
+
+
+def test_workflow_does_not_use_inline_hash_verification_logic():
+    workflow = read_workflow()
+    build_release = extract_job(workflow, "build-release")
+
+    assert "MANIFEST_HASH=" not in build_release
+    assert "COMPUTED_HASH=" not in build_release
+
+
+def test_release_zip_is_created_outside_release_package_directory():
+    workflow = read_workflow()
+    build_release = extract_job(workflow, "build-release")
+
+    assert 'zip -r "../${ARTIFACT_NAME}" .' in build_release
+    assert 'zip -r "./${ARTIFACT_NAME}" .' not in build_release
+
+
+def test_uploaded_release_artifact_includes_zip_and_manifest():
+    workflow = read_workflow()
+    build_release = extract_job(workflow, "build-release")
+
+    upload_step_index = build_release.index("Upload immutable release artifact")
+    upload_section = build_release[upload_step_index:]
+
+    assert "${{ env.ARTIFACT_NAME }}" in upload_section
+    assert "release_manifest.json" in upload_section
+
+
+def test_build_release_does_not_run_on_workflow_dispatch():
+    workflow = read_workflow()
+    build_release = extract_job(workflow, "build-release")
+
+    assert "should_build_release == 'true'" in build_release
+
+def test_databricks_cli_action_should_be_pinned_later():
+    workflow = read_workflow()
+
+    assert "databricks/setup-cli@main" in workflow
+    
 def test_validate_job_does_not_create_or_upload_release_artifact():
     workflow = read_workflow()
     validate = extract_job(workflow, "validate")

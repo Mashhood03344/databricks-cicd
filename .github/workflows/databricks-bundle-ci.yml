@@ -259,16 +259,8 @@ jobs:
 
       - name: Verify release artifact hash
         run: |
-          MANIFEST_HASH="$(jq -r '.release.artifact_hash' release_manifest.json)"
-          COMPUTED_HASH="sha256:$(sha256sum "${ARTIFACT_NAME}" | awk '{print $1}')"
-
-          if [ "${MANIFEST_HASH}" != "${COMPUTED_HASH}" ]; then
-            echo "Release artifact hash verification failed."
-            echo "Manifest hash and computed artifact hash do not match."
-            exit 1
-          fi
-
-          echo "Release artifact hash verification passed."
+          chmod +x scripts/ci_verify_release_hash.sh
+          scripts/ci_verify_release_hash.sh release_manifest.json "${ARTIFACT_NAME}"
 
       - name: Upload immutable release artifact
         uses: actions/upload-artifact@v4
