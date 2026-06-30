@@ -89,6 +89,10 @@ jobs:
         run: |
           python -m pytest Tests/test_ci_workflow_gating.py -v
 
+      - name: Run pytest for Release Hash Validation
+        run: |
+          python -m pytest Tests/test_ci_verify_release_hash.py -v
+
       - name: Run pytest for Deployment Manifest
         env:
           PYTHONPATH: scripts
