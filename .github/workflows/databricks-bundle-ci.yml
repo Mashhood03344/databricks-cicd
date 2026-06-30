@@ -28,36 +28,20 @@ jobs:
       should_build_release: ${{ steps.context.outputs.should_build_release }}
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Make CI helper scripts executable
+        run: |
+          chmod +x scripts/*.sh
+
       - name: Resolve branch context
         id: context
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
-            BRANCH="${{ github.base_ref }}"
-          else
-            BRANCH="${GITHUB_REF_NAME}"
-          fi
-
-          echo "Resolved branch: ${BRANCH}"
-
-          if [ "${BRANCH}" = "dev" ]; then
-            echo "bundle_target=dev" >> "$GITHUB_OUTPUT"
-            echo "github_environment=dev" >> "$GITHUB_OUTPUT"
-          elif [ "${BRANCH}" = "qa" ]; then
-            echo "bundle_target=uat" >> "$GITHUB_OUTPUT"
-            echo "github_environment=uat" >> "$GITHUB_OUTPUT"
-          elif [ "${BRANCH}" = "main" ]; then
-            echo "bundle_target=prod" >> "$GITHUB_OUTPUT"
-            echo "github_environment=prod" >> "$GITHUB_OUTPUT"
-          else
-            echo "Unsupported branch: ${BRANCH}"
-            exit 1
-          fi
-
-          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${BRANCH}" = "dev" ]; then
-            echo "should_build_release=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_build_release=false" >> "$GITHUB_OUTPUT"
-          fi
+          scripts/ci_resolve_context.sh \
+            "${GITHUB_EVENT_NAME}" \
+            "${{ github.base_ref }}" \
+            "${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
   validate:
     name: Validate Bundle
@@ -81,13 +65,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install pytest
-        run: |
-           python -m pip install pytest
-     
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip pytest
 
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
@@ -101,19 +81,31 @@ jobs:
         run: |
           python -m compileall scripts Tests
 
+      - name: Run pytest for CI Workflow Context
+        run: |
+          python -m pytest Tests/test_ci_resolve_context.py -v
+
+      - name: Run pytest for CI Workflow Gating
+        run: |
+          python -m pytest Tests/test_ci_workflow_gating.py -v
+
+      - name: Run pytest for Release Hash Validation
+        run: |
+          python -m pytest Tests/test_ci_verify_release_hash.py -v
+
       - name: Run pytest for Deployment Manifest
         env:
           PYTHONPATH: scripts
           DEPLOYMENT_MANIFEST_SCRIPT: scripts/deployment_manifest.py
         run: |
-          python -m pytest Tests -v
+          python -m pytest Tests/test_deployment_manifest.py -v
 
       - name: Run pytest for Promotion Validator
         env:
           PYTHONPATH: scripts
           PROMOTION_VALIDATOR_SCRIPT: scripts/promotion_validator.py
         run: |
-          python -m pytest Tests -v
+          python -m pytest Tests/test_promotion_validator.py -v
 
       - name: Install Databricks CLI
         uses: databricks/setup-cli@main
@@ -174,6 +166,28 @@ jobs:
             cp -R docs release-package/
           fi
 
+      - name: Generate release_manifest.json without artifact hash
+        run: |
+          cat > release-package/release_manifest.json <<EOF
+          {
+            "schema_version": "1.0",
+            "release": {
+              "release_id": "${RELEASE_ID}",
+              "artifact_name": "${ARTIFACT_NAME}"
+            },
+            "build": {
+              "repository": "${GITHUB_REPOSITORY}",
+              "source_branch": "${GITHUB_REF_NAME}",
+              "commit_sha": "${GITHUB_SHA}",
+              "workflow_name": "${GITHUB_WORKFLOW}",
+              "workflow_run_id": "${GITHUB_RUN_ID}",
+              "workflow_run_number": "${GITHUB_RUN_NUMBER}",
+              "actor": "${GITHUB_ACTOR}",
+              "created_at_utc": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            }
+          }
+          EOF
+
       - name: Create release artifact zip
         run: |
           cd release-package
@@ -184,11 +198,13 @@ jobs:
         run: |
           ARTIFACT_HASH="sha256:$(sha256sum "${ARTIFACT_NAME}" | awk '{print $1}')"
 
+          echo "${ARTIFACT_HASH}" > .release-artifact-hash
           echo "artifact_hash=${ARTIFACT_HASH}" >> "$GITHUB_OUTPUT"
-          echo "ARTIFACT_HASH=${ARTIFACT_HASH}" >> "$GITHUB_ENV"
 
-      - name: Generate release_manifest.json
+      - name: Generate external release_manifest.json
         run: |
+          ARTIFACT_HASH="$(cat .release-artifact-hash)"
+
           cat > release_manifest.json <<EOF
           {
             "schema_version": "1.0",
@@ -210,9 +226,41 @@ jobs:
           }
           EOF
 
-      - name: Add release manifest to zip
+      - name: Validate release manifest schema
         run: |
-          zip "${ARTIFACT_NAME}" release_manifest.json
+          validate_string_field() {
+            local field="$1"
+
+            test "$(jq -r "${field} | type" release_manifest.json)" = "string"
+            test "$(jq -r "${field}" release_manifest.json)" != ""
+          }
+
+          test "$(jq -r '.schema_version' release_manifest.json)" = "1.0"
+
+          required_fields=(
+            ".release.release_id"
+            ".release.artifact_name"
+            ".release.artifact_hash"
+            ".build.repository"
+            ".build.source_branch"
+            ".build.commit_sha"
+            ".build.workflow_name"
+            ".build.workflow_run_id"
+            ".build.workflow_run_number"
+            ".build.actor"
+            ".build.created_at_utc"
+          )
+
+          for field in "${required_fields[@]}"; do
+            validate_string_field "$field"
+          done
+
+          echo "Release manifest schema validation passed."
+
+      - name: Verify release artifact hash
+        run: |
+          chmod +x scripts/ci_verify_release_hash.sh
+          scripts/ci_verify_release_hash.sh release_manifest.json "${ARTIFACT_NAME}"
 
       - name: Upload immutable release artifact
         uses: actions/upload-artifact@v4
