@@ -26,8 +26,11 @@ def get_validator_script():
 
 SCRIPT = get_validator_script()
 
-VALID_RELEASE_ID = "rc-20260624-123456789"
-VALID_ARTIFACT_HASH = "sha256:abc123def456"
+VALID_RELEASE_ID = "rc-20260630-28454858980"
+VALID_ARTIFACT_HASH = (
+    "sha256:0123456789abcdef0123456789abcdef"
+    "0123456789abcdef0123456789abcdef"
+)
 
 
 def release_args(
@@ -47,9 +50,9 @@ def write_json(path: Path, data: dict):
 def valid_manifest(
     *,
     environment="dev",
-    release_id="rc-20260624-123456789",
+    release_id=VALID_RELEASE_ID,
     artifact_name=None,
-    artifact_hash="sha256:abc123def456",
+    artifact_hash=VALID_ARTIFACT_HASH,
     operation_status="SUCCESS",
     workspace_target=None,
     bundle_target=None,
@@ -234,7 +237,7 @@ def test_previous_deployment_failed(tmp_path):
 def test_release_id_mismatch(tmp_path):
     write_json(
         tmp_path / "dev-deployment-manifest.json",
-        valid_manifest(environment="dev", release_id="rc-old-release"),
+        valid_manifest(environment="dev", release_id="rc-20260630-99999999999"),
     )
 
     result, output = run_validator(
@@ -250,7 +253,10 @@ def test_release_id_mismatch(tmp_path):
 def test_artifact_hash_mismatch(tmp_path):
     write_json(
         tmp_path / "dev-deployment-manifest.json",
-        valid_manifest(environment="dev", artifact_hash="sha256:old456"),
+        valid_manifest(
+    environment="dev",
+    artifact_hash="sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    ),
     )
 
     result, output = run_validator(
@@ -425,6 +431,247 @@ def test_empty_artifact_hash_invalid_schema(tmp_path):
     write_json(tmp_path / "dev-deployment-manifest.json", manifest)
 
     result, output = run_validator(tmp_path, "--target-environment", "uat", *release_args())
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+def test_valid_release_id_format(tmp_path):
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "dev",
+        *release_args(release_id=VALID_RELEASE_ID),
+    )
+
+    assert result.returncode == 0
+    assert_decision(output, "PROMOTION_VALID")
+
+
+def test_invalid_release_id_missing_prefix(tmp_path):
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "dev",
+        *release_args(release_id="20260630-28454858980"),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_PROMOTION_SEQUENCE")
+
+
+def test_invalid_release_id_invalid_date_format(tmp_path):
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "dev",
+        *release_args(release_id="rc-2026-06-30-28454858980"),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_PROMOTION_SEQUENCE")
+
+
+def test_invalid_release_id_missing_numeric_identifier(tmp_path):
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "dev",
+        *release_args(release_id="rc-20260630-"),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_PROMOTION_SEQUENCE")
+
+
+def test_invalid_release_id_non_numeric_identifier(tmp_path):
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "dev",
+        *release_args(release_id="rc-20260630-abc123"),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_PROMOTION_SEQUENCE")
+
+
+def test_valid_artifact_hash_format(tmp_path):
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "dev",
+        *release_args(artifact_hash=VALID_ARTIFACT_HASH),
+    )
+
+    assert result.returncode == 0
+    assert_decision(output, "PROMOTION_VALID")
+
+
+def test_invalid_artifact_hash_missing_prefix(tmp_path):
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "dev",
+        *release_args(
+            artifact_hash="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        ),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_PROMOTION_SEQUENCE")
+
+
+def test_invalid_artifact_hash_too_short(tmp_path):
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "dev",
+        *release_args(artifact_hash="sha256:abc123"),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_PROMOTION_SEQUENCE")
+
+
+def test_invalid_artifact_hash_invalid_hex(tmp_path):
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "dev",
+        *release_args(
+            artifact_hash="sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        ),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_PROMOTION_SEQUENCE")
+
+
+def test_invalid_artifact_hash_empty(tmp_path):
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "dev",
+        *release_args(artifact_hash=""),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_PROMOTION_SEQUENCE")
+
+
+def test_valid_operation_action(tmp_path):
+    write_json(
+        tmp_path / "dev-deployment-manifest.json",
+        valid_manifest(environment="dev"),
+    )
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode == 0
+    assert_decision(output, "PROMOTION_VALID")
+
+
+def test_missing_operation_action_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    del manifest["operation"]["action"]
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_empty_operation_action_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["operation"]["action"] = ""
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_invalid_operation_action_value(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["operation"]["action"] = "bundle_validate"
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_valid_artifact_name_matches_release_id(tmp_path):
+    write_json(
+        tmp_path / "dev-deployment-manifest.json",
+        valid_manifest(environment="dev"),
+    )
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode == 0
+    assert_decision(output, "PROMOTION_VALID")
+
+
+def test_artifact_name_mismatch(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["release"]["artifact_name"] = "different-release.zip"
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_artifact_name_wrong_extension(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["release"]["artifact_name"] = f"{VALID_RELEASE_ID}.tar.gz"
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_artifact_name_missing_release_id(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["release"]["artifact_name"] = "artifact.zip"
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
 
     assert result.returncode != 0
     assert_decision(output, "INVALID_MANIFEST_SCHEMA")
