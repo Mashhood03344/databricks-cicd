@@ -1,1 +1,47 @@
-databricks-bundle-ci.yml
+name: Databricks Bundle CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        required: true
+        type: string
+      artifact_hash:
+        required: true
+        type: string
+      target_environment:
+        required: true
+        type: choice
+        options:
+          - dev
+          - uat
+          - prod
+
+jobs:
+  resolve-context:
+    name: Resolve CD Context
+    runs-on: ubuntu-latest
+
+    outputs:
+      target_environment: ${{ steps.context.outputs.target_environment }}
+      release_id: ${{ steps.context.outputs.release_id }}
+      artifact_hash: ${{ steps.context.outputs.artifact_hash }}
+      bundle_target: ${{ steps.context.outputs.bundle_target }}
+      github_environment: ${{ steps.context.outputs.github_environment }}
+      workspace_target: ${{ steps.context.outputs.workspace_target }}
+      previous_environment: ${{ steps.context.outputs.previous_environment }}
+      previous_manifest_path: ${{ steps.context.outputs.previous_manifest_path }}
+      deployment_manifest_name: ${{ steps.context.outputs.deployment_manifest_name }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve CD context
+        id: context
+        run: |
+          chmod +x scripts/cd_resolve_context.sh
+          scripts/cd_resolve_context.sh \
+            "${{ inputs.target_environment }}" \
+            "${{ inputs.release_id }}" \
+            "${{ inputs.artifact_hash }}" >> "$GITHUB_OUTPUT"
