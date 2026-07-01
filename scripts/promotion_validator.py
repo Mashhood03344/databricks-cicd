@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,10 @@ DECISION_BUNDLE_TARGET_MISMATCH = "BUNDLE_TARGET_MISMATCH"
 DECISION_PREVIOUS_ENVIRONMENT_MISMATCH = "PREVIOUS_ENVIRONMENT_MISMATCH"
 
 SUCCESS_STATUS = "SUCCESS"
+EXPECTED_OPERATION_ACTION = "bundle_deploy"
+RELEASE_ID_PATTERN = re.compile(r"^rc-\d{8}-\d+$")
+ARTIFACT_HASH_PATTERN = re.compile(r"^sha256:[a-fA-F0-9]{64}$")
+
 
 
 def utc_now_iso():
@@ -129,6 +134,18 @@ def is_non_empty_string(value):
     return isinstance(value, str) and value.strip() != ""
 
 
+def is_valid_release_id(value):
+    return is_non_empty_string(value) and RELEASE_ID_PATTERN.fullmatch(value) is not None
+
+
+def is_valid_artifact_hash(value):
+    return is_non_empty_string(value) and ARTIFACT_HASH_PATTERN.fullmatch(value) is not None
+
+
+def expected_artifact_name_for(release_id):
+    return f"{release_id}.zip"
+
+
 def validate_required_top_level_fields(manifest):
     required_top_level_fields = [
         "schema_version",
@@ -200,6 +217,7 @@ def validate_manifest_schema(manifest):
         ("bundle", "target"),
         ("git", "commit_sha"),
         ("databricks", "workspace_target"),
+        ("operation", "action"),
         ("operation", "status"),
     ]
 
@@ -224,9 +242,26 @@ def validate_manifest_schema(manifest):
     if workspace_target not in VALID_ENVIRONMENTS:
         return False, f"Invalid databricks.workspace_target value: {workspace_target}"
 
+    operation_action = manifest["operation"]["action"]
+    if operation_action != EXPECTED_OPERATION_ACTION:
+        return False, f"Invalid operation.action value: {operation_action}"
+
     operation_status = manifest["operation"]["status"]
     if operation_status not in VALID_OPERATION_STATUSES:
         return False, f"Invalid operation.status value: {operation_status}"
+
+    release_id = manifest["release"]["release_id"]
+    if not is_valid_release_id(release_id):
+        return False, f"Invalid release.release_id format: {release_id}"
+
+    artifact_hash = manifest["release"]["artifact_hash"]
+    if not is_valid_artifact_hash(artifact_hash):
+        return False, f"Invalid release.artifact_hash format: {artifact_hash}"
+
+    artifact_name = manifest["release"]["artifact_name"]
+    expected_artifact_name = expected_artifact_name_for(release_id)
+    if artifact_name != expected_artifact_name:
+        return False, f"Invalid release.artifact_name value: {artifact_name}"
 
     return True, "Manifest schema is valid"
 
@@ -631,22 +666,22 @@ def main():
 
     input_checks = []
 
-    if not is_non_empty_string(args.release_id):
+    if not is_valid_release_id(args.release_id):
         input_checks.append(
             build_check(
                 "release_id_is_valid",
                 "FAIL",
-                "non-empty string",
+                "rc-YYYYMMDD-<numeric-id>",
                 args.release_id,
             )
         )
 
-    if not is_non_empty_string(args.artifact_hash):
+    if not is_valid_artifact_hash(args.artifact_hash):
         input_checks.append(
             build_check(
                 "artifact_hash_is_valid",
                 "FAIL",
-                "non-empty string",
+                "sha256:<64 hex characters>",
                 args.artifact_hash,
             )
         )
@@ -660,7 +695,7 @@ def main():
             artifact_hash=args.artifact_hash,
             previous_environment=previous_environment_for(target_environment),
             previous_manifest_path=args.previous_manifest_path,
-            message="Release ID and artifact hash must be non-empty strings.",
+            message="Release ID and artifact hash must match the required formats.",
             checks=input_checks,
         )
 
