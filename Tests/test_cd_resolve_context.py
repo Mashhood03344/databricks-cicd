@@ -5,16 +5,13 @@ SCRIPT = Path("scripts/cd_resolve_context.sh")
 
 
 VALID_RELEASE_ID = "rc-20260630-123456"
-VALID_HASH = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-
 
 def run_context(
     target_environment,
-    release_id=VALID_RELEASE_ID,
-    artifact_hash=VALID_HASH,
+    release_id=VALID_RELEASE_ID
 ):
     result = subprocess.run(
-        ["bash", str(SCRIPT), target_environment, release_id, artifact_hash],
+        ["bash", str(SCRIPT), target_environment, release_id],
         capture_output=True,
         text=True,
     )
@@ -35,7 +32,6 @@ def test_dev_outputs_are_exactly_expected():
     assert output == {
         "target_environment": "dev",
         "release_id": VALID_RELEASE_ID,
-        "artifact_hash": VALID_HASH,
         "bundle_target": "dev",
         "github_environment": "dev",
         "workspace_target": "dev",
@@ -52,7 +48,6 @@ def test_uat_outputs_are_exactly_expected():
     assert output == {
         "target_environment": "uat",
         "release_id": VALID_RELEASE_ID,
-        "artifact_hash": VALID_HASH,
         "bundle_target": "uat",
         "github_environment": "uat",
         "workspace_target": "uat",
@@ -69,7 +64,6 @@ def test_prod_outputs_are_exactly_expected():
     assert output == {
         "target_environment": "prod",
         "release_id": VALID_RELEASE_ID,
-        "artifact_hash": VALID_HASH,
         "bundle_target": "prod",
         "github_environment": "prod",
         "workspace_target": "prod",
@@ -86,15 +80,6 @@ def test_release_id_is_passed_through():
 
     assert result.returncode == 0
     assert output["release_id"] == release_id
-
-
-def test_artifact_hash_is_passed_through():
-    artifact_hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-
-    result, output = run_context("dev", artifact_hash=artifact_hash)
-
-    assert result.returncode == 0
-    assert output["artifact_hash"] == artifact_hash
 
 
 def test_invalid_environment_fails():
@@ -132,13 +117,6 @@ def test_invalid_release_id_format_fails():
     assert "Invalid release id: release-123" in result.stderr
 
 
-def test_invalid_artifact_hash_format_fails():
-    result, _ = run_context("dev", artifact_hash="sha256:abcd")
-
-    assert result.returncode != 0
-    assert "Invalid artifact hash: sha256:abcd" in result.stderr
-
-
 def test_missing_target_environment_fails():
     result = subprocess.run(
         ["bash", str(SCRIPT)],
@@ -151,17 +129,7 @@ def test_missing_target_environment_fails():
 
 def test_missing_release_id_fails():
     result = subprocess.run(
-        ["bash", str(SCRIPT), "dev", "", VALID_HASH],
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode != 0
-
-
-def test_missing_artifact_hash_fails():
-    result = subprocess.run(
-        ["bash", str(SCRIPT), "dev", VALID_RELEASE_ID, ""],
+        ["bash", str(SCRIPT), "dev", ""],
         capture_output=True,
         text=True,
     )
@@ -174,15 +142,14 @@ def test_output_contains_expected_keys_only():
 
     assert result.returncode == 0
     assert set(output.keys()) == {
-        "target_environment",
-        "release_id",
-        "artifact_hash",
-        "bundle_target",
-        "github_environment",
-        "workspace_target",
-        "previous_environment",
-        "previous_manifest_path",
-        "deployment_manifest_name",
+    "target_environment",
+    "release_id",
+    "bundle_target",
+    "github_environment",
+    "workspace_target",
+    "previous_environment",
+    "previous_manifest_path",
+    "deployment_manifest_name",
     }
 
 def test_release_id_with_bad_date_format_fails():
@@ -196,21 +163,3 @@ def test_release_id_with_non_numeric_suffix_fails():
 
     assert result.returncode != 0
     assert "Invalid release id" in result.stderr
-
-def test_artifact_hash_without_sha256_prefix_fails():
-    result, _ = run_context(
-        "dev",
-        artifact_hash="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    )
-
-    assert result.returncode != 0
-    assert "Invalid artifact hash" in result.stderrd
-
-def test_artifact_hash_with_non_hex_characters_fails():
-    result, _ = run_context(
-        "dev",
-        artifact_hash="sha256:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
-    )
-
-    assert result.returncode != 0
-    assert "Invalid artifact hash" in result.stderr

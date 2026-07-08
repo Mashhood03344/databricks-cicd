@@ -93,7 +93,7 @@ def valid_manifest(
         },
         "databricks": {
             "workspace_target": workspace_target or environment,
-            "host": "https://example.cloud.databricks.com",
+            "workspace_host": "https://example.cloud.databricks.com",
             "authenticated_principal": "sp-github-actions",
             "workspace_root_path": "/Workspace/test",
         },
@@ -173,6 +173,22 @@ def test_valid_prod_promotion_release_identity_matches(tmp_path):
     assert_decision(output, "PROMOTION_VALID")
     assert output["previous_environment"] == "uat"
     assert output["previous_manifest_path"] == "uat-deployment-manifest.json"
+    
+
+def test_deployment_manifest_contract_is_accepted_by_promotion_validator(tmp_path):
+    write_json(
+        tmp_path / "dev-deployment-manifest.json",
+        valid_manifest(environment="dev"),
+    )
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode == 0
+    assert_decision(output, "PROMOTION_VALID")
 
 
 def test_missing_previous_manifest(tmp_path):

@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 jobs:
@@ -137,12 +137,15 @@ jobs:
         run: |
           RELEASE_ID="rc-$(date -u +%Y%m%d)-${GITHUB_RUN_ID}"
           ARTIFACT_NAME="${RELEASE_ID}.zip"
+          RELEASE_ASSET_NAME="release-${RELEASE_ID}"
 
           echo "release_id=${RELEASE_ID}" >> "$GITHUB_OUTPUT"
           echo "artifact_name=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
+          echo "release_asset_name=${RELEASE_ASSET_NAME}" >> "$GITHUB_OUTPUT"
 
           echo "RELEASE_ID=${RELEASE_ID}" >> "$GITHUB_ENV"
           echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> "$GITHUB_ENV"
+          echo "RELEASE_ASSET_NAME=${RELEASE_ASSET_NAME}" >> "$GITHUB_ENV"
 
       - name: Prepare release directory
         run: |
@@ -166,14 +169,15 @@ jobs:
             cp -R docs release-package/
           fi
 
-      - name: Generate release_manifest.json without artifact hash
+      - name: Generate release build metadata
         run: |
-          cat > release-package/release_manifest.json <<EOF
+          cat > release-package/release_build_metadata.json <<EOF
           {
             "schema_version": "1.0",
             "release": {
               "release_id": "${RELEASE_ID}",
-              "artifact_name": "${ARTIFACT_NAME}"
+              "artifact_name": "${ARTIFACT_NAME}",
+              "release_asset_name": "${RELEASE_ASSET_NAME}"
             },
             "build": {
               "repository": "${GITHUB_REPOSITORY}",
@@ -211,7 +215,8 @@ jobs:
             "release": {
               "release_id": "${RELEASE_ID}",
               "artifact_name": "${ARTIFACT_NAME}",
-              "artifact_hash": "${ARTIFACT_HASH}"
+              "artifact_hash": "${ARTIFACT_HASH}",
+              "release_asset_name": "${RELEASE_ASSET_NAME}"
             },
             "build": {
               "repository": "${GITHUB_REPOSITORY}",
@@ -241,6 +246,7 @@ jobs:
             ".release.release_id"
             ".release.artifact_name"
             ".release.artifact_hash"
+            ".release.release_asset_name"
             ".build.repository"
             ".build.source_branch"
             ".build.commit_sha"
@@ -262,11 +268,15 @@ jobs:
           chmod +x scripts/ci_verify_release_hash.sh
           scripts/ci_verify_release_hash.sh release_manifest.json "${ARTIFACT_NAME}"
 
-      - name: Upload immutable release artifact
-        uses: actions/upload-artifact@v4
+      - name: Publish immutable GitHub release
+        uses: softprops/action-gh-release@v2
         with:
-          name: release-${{ env.RELEASE_ID }}
-          path: |
+          tag_name: ${{ env.RELEASE_ID }}
+          name: ${{ env.RELEASE_ID }}
+          target_commitish: ${{ github.sha }}
+          files: |
             ${{ env.ARTIFACT_NAME }}
             release_manifest.json
-          retention-days: 7
+          draft: false
+          prerelease: true
+          fail_on_unmatched_files: true
