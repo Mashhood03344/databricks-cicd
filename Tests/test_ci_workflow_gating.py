@@ -49,25 +49,56 @@ def test_build_release_requires_context_and_validation():
     assert "- validate" in build_release
 
 
-def test_upload_artifact_only_exists_inside_build_release_job():
+
+def test_github_release_publish_only_exists_inside_build_release_job():
     workflow = read_workflow()
     build_release = extract_job(workflow, "build-release")
     validate = extract_job(workflow, "validate")
     resolve_context = extract_job(workflow, "resolve-context")
 
-    assert "actions/upload-artifact@v4" in build_release
-    assert "actions/upload-artifact@v4" not in validate
-    assert "actions/upload-artifact@v4" not in resolve_context
+    assert "softprops/action-gh-release@v2" in build_release
+    assert "softprops/action-gh-release@v2" not in validate
+    assert "softprops/action-gh-release@v2" not in resolve_context
 
 
-def test_release_artifact_upload_happens_after_hash_verification():
+def test_workflow_does_not_use_github_actions_artifact_upload_for_release():
+    workflow = read_workflow()
+
+    assert "actions/upload-artifact@v4" not in workflow
+    assert "Upload immutable release artifact" not in workflow
+
+
+def test_github_release_publish_happens_after_hash_verification():
     workflow = read_workflow()
     build_release = extract_job(workflow, "build-release")
 
     hash_step_index = build_release.index("Verify release artifact hash")
-    upload_step_index = build_release.index("Upload immutable release artifact")
+    publish_step_index = build_release.index("Publish immutable GitHub release")
 
-    assert hash_step_index < upload_step_index
+    assert hash_step_index < publish_step_index
+
+
+def test_github_release_assets_include_zip_and_manifest():
+    workflow = read_workflow()
+    build_release = extract_job(workflow, "build-release")
+
+    publish_step_index = build_release.index("Publish immutable GitHub release")
+    publish_section = build_release[publish_step_index:]
+
+    assert "softprops/action-gh-release@v2" in publish_section
+    assert "tag_name: ${{ env.RELEASE_ID }}" in publish_section
+    assert "${{ env.ARTIFACT_NAME }}" in publish_section
+    assert "release_manifest.json" in publish_section
+    assert "fail_on_unmatched_files: true" in publish_section
+
+
+def test_release_asset_name_matches_artifact_name_contract():
+    workflow = read_workflow()
+    build_release = extract_job(workflow, "build-release")
+
+    assert 'RELEASE_ASSET_NAME="${ARTIFACT_NAME}"' in build_release
+    assert 'RELEASE_ASSET_NAME="release-${RELEASE_ID}"' not in build_release
+
 
 def test_workflow_calls_release_hash_verification_script():
     workflow = read_workflow()
@@ -92,27 +123,23 @@ def test_release_zip_is_created_outside_release_package_directory():
     assert 'zip -r "./${ARTIFACT_NAME}" .' not in build_release
 
 
-def test_uploaded_release_artifact_includes_zip_and_manifest():
-    workflow = read_workflow()
-    build_release = extract_job(workflow, "build-release")
-
-    upload_step_index = build_release.index("Upload immutable release artifact")
-    upload_section = build_release[upload_step_index:]
-
-    assert "${{ env.ARTIFACT_NAME }}" in upload_section
-    assert "release_manifest.json" in upload_section
-
-
 def test_build_release_does_not_run_on_workflow_dispatch():
     workflow = read_workflow()
     build_release = extract_job(workflow, "build-release")
 
     assert "should_build_release == 'true'" in build_release
 
-def test_databricks_cli_action_should_be_pinned_later():
-    workflow = read_workflow()
 
-    assert "databricks/setup-cli@main" in workflow
+def test_github_release_is_not_draft_and_is_prerelease():
+    workflow = read_workflow()
+    build_release = extract_job(workflow, "build-release")
+
+    publish_step_index = build_release.index("Publish immutable GitHub release")
+    publish_section = build_release[publish_step_index:]
+
+    assert "draft: false" in publish_section
+    assert "prerelease: true" in publish_section
+
     
 def test_validate_job_does_not_create_or_upload_release_artifact():
     workflow = read_workflow()
@@ -121,7 +148,8 @@ def test_validate_job_does_not_create_or_upload_release_artifact():
     forbidden_terms = [
         "Create release artifact zip",
         "Generate external release_manifest.json",
-        "Upload immutable release artifact",
+        "Publish immutable GitHub release",
+        "softprops/action-gh-release@v2",
         "actions/upload-artifact@v4",
     ]
 
