@@ -28,6 +28,9 @@ EXPECTED_OPERATION_ACTION = "bundle_deploy"
 RELEASE_ID_PATTERN = re.compile(r"^rc-\d{8}-\d+$")
 ARTIFACT_HASH_PATTERN = re.compile(r"^sha256:[a-fA-F0-9]{64}$")
 
+EXPECTED_EVIDENCE_STORAGE_TYPE = "github_release_asset"
+EXPECTED_EVIDENCE_ARTIFACT_VERSION = "1.0"
+
 
 
 def utc_now_iso():
@@ -145,6 +148,9 @@ def is_valid_artifact_hash(value):
 def expected_artifact_name_for(release_id):
     return f"{release_id}.zip"
 
+def expected_deployment_manifest_name(environment):
+    return f"{environment}-deployment-manifest.json"
+
 
 def validate_required_top_level_fields(manifest):
     required_top_level_fields = [
@@ -156,6 +162,7 @@ def validate_required_top_level_fields(manifest):
         "bundle",
         "git",
         "github_actions",
+        "evidence_storage",
         "databricks",
         "operation",
     ]
@@ -174,6 +181,7 @@ def validate_required_section_types(manifest):
         "bundle",
         "git",
         "github_actions",
+        "evidence_storage",
         "databricks",
         "operation",
     ]
@@ -216,6 +224,13 @@ def validate_manifest_schema(manifest):
         ("environment",),
         ("bundle", "target"),
         ("git", "commit_sha"),
+        ("github_actions", "workflow_run_id"),
+        ("github_actions", "workflow_run_number"),
+        ("evidence_storage", "storage_type"),
+        ("evidence_storage", "artifact_name"),
+        ("evidence_storage", "artifact_version"),
+        ("evidence_storage", "artifact_generated_by_run_id"),
+        ("evidence_storage", "artifact_generated_by_run_number"),
         ("databricks", "workspace_target"),
         ("operation", "action"),
         ("operation", "status"),
@@ -262,6 +277,74 @@ def validate_manifest_schema(manifest):
     expected_artifact_name = expected_artifact_name_for(release_id)
     if artifact_name != expected_artifact_name:
         return False, f"Invalid release.artifact_name value: {artifact_name}"
+
+    evidence_storage_type = manifest["evidence_storage"]["storage_type"]
+
+    if evidence_storage_type != EXPECTED_EVIDENCE_STORAGE_TYPE:
+        return (
+            False,
+            f"Invalid evidence_storage.storage_type value: "
+            f"{evidence_storage_type}",
+    )
+
+    evidence_artifact_name = manifest["evidence_storage"]["artifact_name"]
+
+    expected_evidence_artifact_name = expected_deployment_manifest_name(
+        manifest["environment"]
+    )
+
+    if evidence_artifact_name != expected_evidence_artifact_name:
+        return (
+            False,
+            "Invalid evidence_storage.artifact_name value: "
+            f"{evidence_artifact_name}",
+        )
+
+    evidence_artifact_version = manifest["evidence_storage"]["artifact_version"]
+
+    if evidence_artifact_version != EXPECTED_EVIDENCE_ARTIFACT_VERSION:
+        return (
+            False,
+            "Invalid evidence_storage.artifact_version value: "
+            f"{evidence_artifact_version}",
+        )
+
+    evidence_storage = manifest["evidence_storage"]
+
+    if "artifact_retention_days" not in evidence_storage:
+        return (
+            False,
+            "Missing field: evidence_storage.artifact_retention_days",
+        )
+
+    if evidence_storage["artifact_retention_days"] is not None:
+        return (
+            False,
+            "evidence_storage.artifact_retention_days must be null "
+            "for GitHub Release assets",
+        )
+    
+    workflow_run_id = manifest["github_actions"]["workflow_run_id"]
+    evidence_run_id = evidence_storage["artifact_generated_by_run_id"]
+
+    if evidence_run_id != workflow_run_id:
+        return (
+            False,
+            "Evidence generating run ID does not match "
+            "github_actions.workflow_run_id",
+        )
+
+    workflow_run_number = manifest["github_actions"]["workflow_run_number"]
+    evidence_run_number = evidence_storage[
+        "artifact_generated_by_run_number"
+    ]
+
+    if evidence_run_number != workflow_run_number:
+        return (
+            False,
+            "Evidence generating run number does not match "
+            "github_actions.workflow_run_number",
+        )
 
     return True, "Manifest schema is valid"
 

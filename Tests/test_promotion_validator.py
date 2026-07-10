@@ -91,6 +91,14 @@ def valid_manifest(
             "job_name": f"deploy-{environment}",
             "event_name": "workflow_dispatch",
         },
+        "evidence_storage": {
+            "storage_type": "github_release_asset",
+            "artifact_name": f"{environment}-deployment-manifest.json",
+            "artifact_version": "1.0",
+            "artifact_generated_by_run_id": "123",
+            "artifact_generated_by_run_number": "1",
+            "artifact_retention_days": None,
+        },
         "databricks": {
             "workspace_target": workspace_target or environment,
             "workspace_host": "https://example.cloud.databricks.com",
@@ -203,12 +211,10 @@ def test_missing_previous_manifest(tmp_path):
 
 def test_previous_environment_mismatch(tmp_path):
     manifest = valid_manifest(
-        environment="dev",
+        environment="uat",
         workspace_target="dev",
         bundle_target="dev",
     )
-
-    manifest["environment"] = "uat"
 
     write_json(
         tmp_path / "dev-deployment-manifest.json",
@@ -225,7 +231,8 @@ def test_previous_environment_mismatch(tmp_path):
     assert_decision(output, "PREVIOUS_ENVIRONMENT_MISMATCH")
 
     failed_check = next(
-        check for check in output["checks"]
+        check
+        for check in output["checks"]
         if check["name"] == "previous_environment_matches"
     )
 
@@ -563,6 +570,327 @@ def test_invalid_artifact_hash_empty(tmp_path):
 
     assert result.returncode != 0
     assert_decision(output, "INVALID_PROMOTION_SEQUENCE")
+
+def test_valid_github_release_storage_type(tmp_path):
+    write_json(
+        tmp_path / "dev-deployment-manifest.json",
+        valid_manifest(environment="dev"),
+    )
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode == 0
+    assert_decision(output, "PROMOTION_VALID")
+
+
+def test_invalid_storage_type(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["evidence_storage"]["storage_type"] = "github_actions_artifact"
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_valid_evidence_artifact_version(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["evidence_storage"]["artifact_version"] = "1.0"
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode == 0
+    assert_decision(output, "PROMOTION_VALID")
+
+
+def test_invalid_evidence_artifact_version(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["evidence_storage"]["artifact_version"] = "2.0"
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+def test_valid_evidence_artifact_name(tmp_path):
+    write_json(
+        tmp_path / "dev-deployment-manifest.json",
+        valid_manifest(environment="dev"),
+    )
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode == 0
+    assert_decision(output, "PROMOTION_VALID")
+
+
+def test_evidence_artifact_name_environment_mismatch(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["evidence_storage"]["artifact_name"] = (
+        "uat-deployment-manifest.json"
+    )
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+def test_missing_artifact_retention_days_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    del manifest["evidence_storage"]["artifact_retention_days"]
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_artifact_retention_days_null_valid(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["evidence_storage"]["artifact_retention_days"] = None
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode == 0
+    assert_decision(output, "PROMOTION_VALID")
+
+
+def test_artifact_retention_days_not_null_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["evidence_storage"]["artifact_retention_days"] = 7
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+def test_missing_evidence_storage_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    del manifest["evidence_storage"]
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_evidence_storage_not_object_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["evidence_storage"] = "not-an-object"
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_missing_evidence_storage_type_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    del manifest["evidence_storage"]["storage_type"]
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_missing_evidence_artifact_name_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    del manifest["evidence_storage"]["artifact_name"]
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_missing_evidence_artifact_version_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    del manifest["evidence_storage"]["artifact_version"]
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_missing_evidence_generated_run_id_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    del manifest["evidence_storage"]["artifact_generated_by_run_id"]
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_missing_evidence_generated_run_number_invalid_schema(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    del manifest["evidence_storage"]["artifact_generated_by_run_number"]
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+def test_matching_workflow_run_id(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["github_actions"]["workflow_run_id"] = "123"
+    manifest["evidence_storage"]["artifact_generated_by_run_id"] = "123"
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode == 0
+    assert_decision(output, "PROMOTION_VALID")
+
+
+def test_workflow_run_id_mismatch(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["github_actions"]["workflow_run_id"] = "123"
+    manifest["evidence_storage"]["artifact_generated_by_run_id"] = "999"
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
+
+
+def test_matching_workflow_run_number(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["github_actions"]["workflow_run_number"] = "1"
+    manifest["evidence_storage"]["artifact_generated_by_run_number"] = "1"
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode == 0
+    assert_decision(output, "PROMOTION_VALID")
+
+
+def test_workflow_run_number_mismatch(tmp_path):
+    manifest = valid_manifest(environment="dev")
+    manifest["github_actions"]["workflow_run_number"] = "1"
+    manifest["evidence_storage"]["artifact_generated_by_run_number"] = "2"
+
+    write_json(tmp_path / "dev-deployment-manifest.json", manifest)
+
+    result, output = run_validator(
+        tmp_path,
+        "--target-environment", "uat",
+        *release_args(),
+    )
+
+    assert result.returncode != 0
+    assert_decision(output, "INVALID_MANIFEST_SCHEMA")
 
 
 def test_valid_operation_action(tmp_path):
