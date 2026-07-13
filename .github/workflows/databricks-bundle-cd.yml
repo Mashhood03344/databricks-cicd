@@ -135,3 +135,126 @@ jobs:
           echo "Verified release ID: ${VERIFIED_RELEASE_ID}"
           echo "Verified artifact name: ${VERIFIED_ARTIFACT_NAME}"
           echo "Verified artifact hash: ${VERIFIED_ARTIFACT_HASH}"
+
+  validate-promotion:
+    name: Validate Release Promotion
+    runs-on: ubuntu-latest
+
+    needs:
+      - resolve-context
+      - verify-release
+
+    outputs:
+      decision: ${{ steps.read-result.outputs.decision }}
+      valid: ${{ steps.read-result.outputs.valid }}
+      result_file: ${{ steps.read-result.outputs.result_file }}
+
+    steps:
+      - name: Checkout trusted repository scripts
+        uses: actions/checkout@v4
+
+      - name: Download previous deployment evidence
+        if: needs.resolve-context.outputs.previous_environment != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.verify-release.outputs.release_id }}
+          PREVIOUS_MANIFEST_PATH: ${{ needs.resolve-context.outputs.previous_manifest_path }}
+        run: |
+          set -euo pipefail
+
+          gh release download "${RELEASE_ID}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir . \
+            --pattern "${PREVIOUS_MANIFEST_PATH}"
+
+          test -f "${PREVIOUS_MANIFEST_PATH}"
+
+          echo "Downloaded previous deployment evidence:"
+          echo "${PREVIOUS_MANIFEST_PATH}"
+
+      - name: Run promotion validator
+        shell: bash
+        env:
+          TARGET_ENVIRONMENT: ${{ needs.resolve-context.outputs.target_environment }}
+          RELEASE_ID: ${{ needs.verify-release.outputs.release_id }}
+          ARTIFACT_HASH: ${{ needs.verify-release.outputs.artifact_hash }}
+          PREVIOUS_MANIFEST_PATH: ${{ needs.resolve-context.outputs.previous_manifest_path }}
+        run: |
+          set -euo pipefail
+
+          validator_command=(
+            python scripts/promotion_validator.py
+            --target-environment "${TARGET_ENVIRONMENT}"
+            --release-id "${RELEASE_ID}"
+            --artifact-hash "${ARTIFACT_HASH}"
+          )
+
+          if [ -n "${PREVIOUS_MANIFEST_PATH}" ]; then
+            validator_command+=(
+              --previous-manifest-path "${PREVIOUS_MANIFEST_PATH}"
+            )
+          fi
+
+          printf 'Running promotion validation for environment: %s\n' \
+            "${TARGET_ENVIRONMENT}"
+
+          "${validator_command[@]}"
+
+      - name: Read promotion validation result
+        id: read-result
+        shell: bash
+        env:
+          TARGET_ENVIRONMENT: ${{ needs.resolve-context.outputs.target_environment }}
+        run: |
+          set -euo pipefail
+
+          RESULT_FILE="${TARGET_ENVIRONMENT}-promotion-validation-result.json"
+
+          if [ ! -f "${RESULT_FILE}" ]; then
+            echo "Promotion validation result was not created: ${RESULT_FILE}" >&2
+            exit 1
+          fi
+
+          DECISION="$(jq -r '.decision // empty' "${RESULT_FILE}")"
+          VALID="$(jq -r '.valid // empty' "${RESULT_FILE}")"
+
+          if [ -z "${DECISION}" ]; then
+            echo "Promotion decision is missing from ${RESULT_FILE}" >&2
+            exit 1
+          fi
+
+          if [ "${VALID}" != "true" ] && [ "${VALID}" != "false" ]; then
+            echo "Promotion valid field is invalid: ${VALID}" >&2
+            exit 1
+          fi
+
+          echo "decision=${DECISION}" >> "$GITHUB_OUTPUT"
+          echo "valid=${VALID}" >> "$GITHUB_OUTPUT"
+          echo "result_file=${RESULT_FILE}" >> "$GITHUB_OUTPUT"
+
+          echo "Promotion decision: ${DECISION}"
+          echo "Promotion valid: ${VALID}"
+
+          if [ "${VALID}" != "true" ]; then
+            echo "Promotion validation did not approve deployment." >&2
+            exit 1
+          fi
+
+      - name: Display promotion validation checks
+        shell: bash
+        env:
+          RESULT_FILE: ${{ steps.read-result.outputs.result_file }}
+        run: |
+          set -euo pipefail
+
+          jq '{
+            decision,
+            valid,
+            target_environment,
+            release_id,
+            artifact_hash,
+            previous_environment,
+            message,
+            checks
+          }' "${RESULT_FILE}"
