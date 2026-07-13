@@ -375,3 +375,21 @@ jobs:
 
           databricks bundle validate \
             --target "${BUNDLE_TARGET}"
+            
+
+      - name: Deploy Databricks bundle
+        shell: bash
+        working-directory: bundle-source
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          DATABRICKS_AUTH_TYPE: oauth-m2m
+          BUNDLE_TARGET: ${{ needs.resolve-context.outputs.bundle_target }}
+        run: |
+          set -euo pipefail
+
+          databricks bundle deploy \
+            --target "${BUNDLE_TARGET}"
+
+          echo "Databricks bundle deployment completed for target: ${BUNDLE_TARGET}"
