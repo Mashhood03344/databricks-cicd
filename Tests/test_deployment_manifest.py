@@ -275,6 +275,37 @@ def test_build_manifest_includes_evidence_storage():
     assert manifest["evidence_storage"]["artifact_generated_by_run_number"] == "42"
     assert manifest["evidence_storage"]["artifact_retention_days"] == 7
 
+
+def test_github_release_asset_accepts_null_retention():
+    args = make_args("dev")
+    args.evidence_storage_type = "github_release_asset"
+    args.evidence_artifact_name = "dev-deployment-manifest.json"
+    args.evidence_artifact_retention_days = None
+
+    manifest = build_manifest(args)
+
+    assert manifest["evidence_storage"]["storage_type"] == "github_release_asset"
+    assert (
+        manifest["evidence_storage"]["artifact_name"]
+        == "dev-deployment-manifest.json"
+    )
+    assert manifest["evidence_storage"]["artifact_retention_days"] is None
+
+
+
+def test_github_actions_artifact_accepts_integer_retention():
+    args = make_args("dev")
+    args.evidence_storage_type = "github_actions_artifact"
+    args.evidence_artifact_retention_days = 7
+
+    manifest = build_manifest(args)
+
+    assert (
+        manifest["evidence_storage"]["storage_type"]
+        == "github_actions_artifact"
+    )
+    assert manifest["evidence_storage"]["artifact_retention_days"] == 7
+
 def test_deployment_id_copied_exactly_from_args():
     manifest = build_manifest(make_args())
 
@@ -375,6 +406,88 @@ def test_artifact_hash_required_when_missing(tmp_path):
     assert result.returncode != 0
     assert "artifact-hash" in result.stderr.lower()
 
+
+def test_github_release_asset_rejects_integer_retention(tmp_path):
+    output_path = tmp_path / "dev-deployment-manifest.json"
+
+    result = run_script(
+        output_path=output_path,
+        extra_args=[
+            "--evidence-storage-type",
+            "github_release_asset",
+            "--evidence-artifact-name",
+            "dev-deployment-manifest.json",
+            "--evidence-artifact-retention-days",
+            "7",
+        ],
+    )
+
+    assert result.returncode != 0
+    assert "must be null" in result.stderr.lower()
+
+
+def test_github_actions_artifact_rejects_null_retention(tmp_path):
+    output_path = tmp_path / "dev-deployment-manifest.json"
+
+    result = run_script(
+        output_path=output_path,
+        extra_args=[
+            "--evidence-storage-type",
+            "github_actions_artifact",
+            "--evidence-artifact-retention-days",
+            "null",
+        ],
+    )
+
+    assert result.returncode != 0
+    assert "must be an integer" in result.stderr.lower()
+
+
+def test_cli_accepts_null_and_emits_json_null(tmp_path):
+    output_path = tmp_path / "dev-deployment-manifest.json"
+
+    result = run_script(
+        output_path=output_path,
+        extra_args=[
+            "--evidence-storage-type",
+            "github_release_asset",
+            "--evidence-artifact-name",
+            "dev-deployment-manifest.json",
+            "--evidence-artifact-retention-days",
+            "null",
+        ],
+    )
+
+    assert_success(result)
+
+    data = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert data["evidence_storage"]["storage_type"] == "github_release_asset"
+    assert (
+        data["evidence_storage"]["artifact_name"]
+        == "dev-deployment-manifest.json"
+    )
+    assert data["evidence_storage"]["artifact_retention_days"] is None
+
+
+def test_invalid_retention_value_fails_validation(tmp_path):
+    output_path = tmp_path / "dev-deployment-manifest.json"
+
+    result = run_script(
+        output_path=output_path,
+        extra_args=[
+            "--evidence-storage-type",
+            "github_release_asset",
+            "--evidence-artifact-retention-days",
+            "not-a-retention-value",
+        ],
+    )
+
+    assert result.returncode != 0
+    assert "expected an integer or one of" in result.stderr.lower()
+
+
+    
 
 def test_cli_output_contains_release_metadata(tmp_path):
     output_path = tmp_path / "dev-deployment-manifest.json"

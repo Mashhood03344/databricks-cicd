@@ -582,7 +582,7 @@ jobs:
             --evidence-storage-type "github_release_asset" \
             --evidence-artifact-name "${DEPLOYMENT_MANIFEST_NAME}" \
             --evidence-artifact-version "1.0" \
-            --evidence-artifact-retention-days 0 \
+            --evidence-artifact-retention-days null \
             --databricks-host "${DATABRICKS_HOST}" \
             --output-path "${DEPLOYMENT_MANIFEST_NAME}"
 

@@ -98,6 +98,18 @@ def build_manifest(args):
 
     return manifest
 
+def optional_int(value: str):
+    normalized_value = value.strip().lower()
+
+    if normalized_value in {"null", "none", ""}:
+        return None
+
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "Expected an integer or one of: null, none"
+        ) from exc
 
 def env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
@@ -141,10 +153,19 @@ def parse_args():
     parser.add_argument("--github-job", default=env("GITHUB_JOB"))
     parser.add_argument("--github-event-name", default=env("GITHUB_EVENT_NAME"))
 
-    parser.add_argument("--evidence-storage-type", default="github_actions_artifact")
+    parser.add_argument(
+        "--evidence-storage-type",
+        choices={"github_actions_artifact", "github_release_asset"},
+        default="github_actions_artifact",
+    )
     parser.add_argument("--evidence-artifact-name", default=None)
     parser.add_argument("--evidence-artifact-version", default="1.0")
-    parser.add_argument("--evidence-artifact-retention-days", type=int, default=7)
+    parser.add_argument(
+        "--evidence-artifact-retention-days",
+        type=optional_int,
+        default=7,
+        help="Retention period in days, or null when the storage type has no retention period.",
+    )
 
     parser.add_argument("--databricks-host", default=env("DATABRICKS_HOST"))
 
@@ -154,10 +175,31 @@ def parse_args():
         help="Output manifest path. Defaults to <environment>-deployment-manifest.json",
     )
 
+    
     args = parser.parse_args()
 
     if args.evidence_artifact_name is None:
-        args.evidence_artifact_name = f"{args.environment.lower()}-deployment-evidence"
+        args.evidence_artifact_name = (
+            f"{args.environment.lower()}-deployment-evidence"
+        )
+
+    if (
+        args.evidence_storage_type == "github_release_asset"
+        and args.evidence_artifact_retention_days is not None
+    ):
+        parser.error(
+            "--evidence-artifact-retention-days must be null "
+            "when --evidence-storage-type is github_release_asset"
+        )
+
+    if (
+        args.evidence_storage_type == "github_actions_artifact"
+        and args.evidence_artifact_retention_days is None
+    ):
+        parser.error(
+            "--evidence-artifact-retention-days must be an integer "
+            "when --evidence-storage-type is github_actions_artifact"
+        )
 
     return args
 
