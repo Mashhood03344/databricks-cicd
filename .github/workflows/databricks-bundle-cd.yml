@@ -531,6 +531,30 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "=== Deployment manifest runtime diagnostics ==="
+
+          echo "Current directory:"
+          pwd
+
+          echo "Repository commit:"
+          git rev-parse HEAD || true
+
+          echo "Script absolute path:"
+          realpath scripts/deployment_manifest.py
+
+          echo "Retention parser implementation:"
+          grep -n -A8 -B3 \
+            "evidence-artifact-retention-days" \
+            scripts/deployment_manifest.py
+
+          echo "optional_int implementation:"
+          grep -n -A15 \
+            "def optional_int" \
+            scripts/deployment_manifest.py || true
+
+          echo "CLI help:"
+          python scripts/deployment_manifest.py --help
+
           DEPLOYMENT_ID="github-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}-${TARGET_ENVIRONMENT}"
 
           case "${TARGET_ENVIRONMENT}" in
