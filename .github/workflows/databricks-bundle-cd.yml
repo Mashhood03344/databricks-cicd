@@ -528,8 +528,17 @@ jobs:
           STARTED_AT: ${{ steps.deployment-start.outputs.started_at }}
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           AUTHENTICATED_PRINCIPAL: ${{ steps.principal.outputs.principal }}
+          TRUSTED_SCRIPTS_DIR: ${{ github.workspace }}/scripts
+          BUNDLE_SOURCE_DIR: ${{ github.workspace }}/bundle-source
         run: |
           set -euo pipefail
+
+          TRUSTED_MANIFEST_SCRIPT="${TRUSTED_SCRIPTS_DIR}/deployment_manifest.py"
+          DEPLOYMENT_MANIFEST_PATH="${BUNDLE_SOURCE_DIR}/${DEPLOYMENT_MANIFEST_NAME}"
+
+          test -d "${TRUSTED_SCRIPTS_DIR}"
+          test -d "${BUNDLE_SOURCE_DIR}"
+          test -f "${TRUSTED_MANIFEST_SCRIPT}"
 
           echo "=== Deployment manifest runtime diagnostics ==="
 
@@ -537,23 +546,29 @@ jobs:
           pwd
 
           echo "Repository commit:"
-          git rev-parse HEAD || true
+          git -C "${GITHUB_WORKSPACE}" rev-parse HEAD
 
-          echo "Script absolute path:"
-          realpath scripts/deployment_manifest.py
+          echo "Trusted scripts directory:"
+          printf '%s\n' "${TRUSTED_SCRIPTS_DIR}"
+
+          echo "Bundle source directory:"
+          printf '%s\n' "${BUNDLE_SOURCE_DIR}"
+
+          echo "Trusted deployment manifest script:"
+          realpath "${TRUSTED_MANIFEST_SCRIPT}"
 
           echo "Retention parser implementation:"
           grep -n -A8 -B3 \
             "evidence-artifact-retention-days" \
-            scripts/deployment_manifest.py
+            "${TRUSTED_MANIFEST_SCRIPT}"
 
           echo "optional_int implementation:"
           grep -n -A15 \
             "def optional_int" \
-            scripts/deployment_manifest.py || true
+            "${TRUSTED_MANIFEST_SCRIPT}" || true
 
-          echo "CLI help:"
-          python scripts/deployment_manifest.py --help
+          echo "Trusted script CLI help:"
+          python "${TRUSTED_MANIFEST_SCRIPT}" --help
 
           DEPLOYMENT_ID="github-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}-${TARGET_ENVIRONMENT}"
 
@@ -577,10 +592,9 @@ jobs:
           echo "Target environment: ${TARGET_ENVIRONMENT}"
           echo "Target branch: ${TARGET_BRANCH}"
 
-
           WORKSPACE_ROOT_PATH="/Workspace/Users/${AUTHENTICATED_PRINCIPAL}/.bundle/databricks-cicd-bundle-poc/${BUNDLE_TARGET}"
 
-          python scripts/deployment_manifest.py \
+          python "${TRUSTED_MANIFEST_SCRIPT}" \
             --deployment-id "${DEPLOYMENT_ID}" \
             --environment "${TARGET_ENVIRONMENT}" \
             --release-id "${RELEASE_ID}" \
@@ -608,11 +622,11 @@ jobs:
             --evidence-artifact-version "1.0" \
             --evidence-artifact-retention-days null \
             --databricks-host "${DATABRICKS_HOST}" \
-            --output-path "${DEPLOYMENT_MANIFEST_NAME}"
+            --output-path "${DEPLOYMENT_MANIFEST_PATH}"
 
-          test -f "${DEPLOYMENT_MANIFEST_NAME}"
+          test -f "${DEPLOYMENT_MANIFEST_PATH}"
 
-          jq . "${DEPLOYMENT_MANIFEST_NAME}"
+          jq . "${DEPLOYMENT_MANIFEST_PATH}"
 
 
       - name: Upload deployment manifest to GitHub Release
