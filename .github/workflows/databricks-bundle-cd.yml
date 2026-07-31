@@ -223,7 +223,7 @@ jobs:
           TARGET_ENVIRONMENT: ${{ needs.resolve-context.outputs.target_environment }}
           RELEASE_ID: ${{ needs.verify-release.outputs.release_id }}
           ARTIFACT_HASH: ${{ needs.verify-release.outputs.artifact_hash }}
-          PREVIOUS_MANIFEST_PATH: ${{ needs.resolve-context.outputs.previous_manifest_path }}
+          PREVIOUS_MANIFEST_PATH: ${{ needs.resolve-context.outputs.selected_previous_manifest_asset }}
         run: |
           set -euo pipefail
 
@@ -232,9 +232,7 @@ jobs:
             --target-environment "${{ needs.resolve-context.outputs.target_environment }}" \
             --release-id "${{ inputs.release_id }}" \
             --artifact-hash "${{ needs.verify-release.outputs.artifact_hash }}" \
-            --previous-manifest-path \
-              "${{ needs.resolve-context.outputs.selected_previous_manifest_asset }}"
-              )
+            )
 
           if [[ -n "$PREVIOUS_MANIFEST_PATH" ]]; then
             command+=(--previous-manifest-path "$PREVIOUS_MANIFEST_PATH")
