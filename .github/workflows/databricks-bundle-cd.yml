@@ -3,6 +3,11 @@ name: Databricks Bundle CD
 on:
   workflow_dispatch:
     inputs:
+      previous_manifest_asset:
+        description: "Test-only previous deployment manifest asset"
+        required: false
+        type: string
+        default: ""
       release_id:
         description: "Release ID in format rc-YYYYMMDD-GITHUB_RUN_ID, for example rc-20260731-123456789"
         required: true
@@ -62,6 +67,12 @@ jobs:
             "${{ inputs.target_environment }}" \
             "${{ inputs.release_id }}" \
             >> "$GITHUB_OUTPUT"
+
+          previous_manifest_asset="${{ inputs.previous_manifest_asset }}"
+
+          if [[ -z "$previous_manifest_asset" ]]; then
+            previous_manifest_asset="${{ needs.resolve-context.outputs.previous_manifest_path }}"
+          fi
 
       - name: Resolve orchestration names
         id: names
