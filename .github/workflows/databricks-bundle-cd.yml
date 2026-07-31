@@ -60,41 +60,55 @@ jobs:
       - name: Resolve CD context
         id: context
         shell: bash
-        run: |
-          set -euo pipefail
-          chmod +x scripts/cd_resolve_context.sh
-          scripts/cd_resolve_context.sh \
-            "${{ inputs.target_environment }}" \
-            "${{ inputs.release_id }}" \
-            >> "$GITHUB_OUTPUT"
-
-          previous_manifest_asset="${{ inputs.previous_manifest_asset }}"
-
-          if [[ -z "$previous_manifest_asset" ]]; then
-            previous_manifest_asset="${{ needs.resolve-context.outputs.previous_manifest_path }}"
-          fi
-
-      - name: Resolve orchestration names
-        id: names
-        shell: bash
         env:
-          TARGET_ENVIRONMENT: ${{ steps.context.outputs.target_environment }}
+          INPUT_PREVIOUS_MANIFEST_ASSET: ${{ inputs.previous_manifest_asset }}
         run: |
           set -euo pipefail
-
-          case "$TARGET_ENVIRONMENT" in
-            dev)  TARGET_BRANCH="dev" ;;
-            uat)  TARGET_BRANCH="qa" ;;
-            prod) TARGET_BRANCH="main" ;;
-            *)
-              echo "Unsupported target environment: $TARGET_ENVIRONMENT" >&2
-              exit 1
-              ;;
-          esac
-
-          echo "canonical_manifest_name=${TARGET_ENVIRONMENT}-deployment-manifest.json" >> "$GITHUB_OUTPUT"
-          echo "historical_manifest_name=${TARGET_ENVIRONMENT}-deployment-manifest-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}.json" >> "$GITHUB_OUTPUT"
-          echo "target_branch=${TARGET_BRANCH}" >> "$GITHUB_OUTPUT"
+      
+          chmod +x scripts/cd_resolve_context.sh
+      
+          context_output="$(
+            scripts/cd_resolve_context.sh \
+              "${{ inputs.target_environment }}" \
+              "${{ inputs.release_id }}"
+          )"
+      
+          printf '%s\n' "$context_output" >> "$GITHUB_OUTPUT"
+      
+          default_previous_manifest_path="$(
+            printf '%s\n' "$context_output" |
+            awk -F= '$1 == "previous_manifest_path" { print $2 }'
+          )"
+      
+          previous_manifest_asset="$INPUT_PREVIOUS_MANIFEST_ASSET"
+      
+          if [[ -z "$previous_manifest_asset" ]]; then
+            previous_manifest_asset="$default_previous_manifest_path"
+          fi
+      
+          echo "selected_previous_manifest_asset=$previous_manifest_asset" \
+            >> "$GITHUB_OUTPUT"
+            - name: Resolve orchestration names
+              id: names
+              shell: bash
+              env:
+                TARGET_ENVIRONMENT: ${{ steps.context.outputs.target_environment }}
+              run: |
+                set -euo pipefail
+      
+                case "$TARGET_ENVIRONMENT" in
+                  dev)  TARGET_BRANCH="dev" ;;
+                  uat)  TARGET_BRANCH="qa" ;;
+                  prod) TARGET_BRANCH="main" ;;
+                  *)
+                    echo "Unsupported target environment: $TARGET_ENVIRONMENT" >&2
+                    exit 1
+                    ;;
+                esac
+      
+                echo "canonical_manifest_name=${TARGET_ENVIRONMENT}-deployment-manifest.json" >> "$GITHUB_OUTPUT"
+                echo "historical_manifest_name=${TARGET_ENVIRONMENT}-deployment-manifest-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}.json" >> "$GITHUB_OUTPUT"
+                echo "target_branch=${TARGET_BRANCH}" >> "$GITHUB_OUTPUT"
 
   verify-release:
     name: Verify Immutable Release
@@ -178,12 +192,28 @@ jobs:
         run: |
           set -euo pipefail
 
-          gh release download "$RELEASE_ID" \
+          gh release download "${{ inputs.release_id }}" \
             --repo "$GITHUB_REPOSITORY" \
             --dir . \
-            --pattern "$PREVIOUS_MANIFEST_PATH"
+            --pattern "${{ needs.resolve-context.outputs.selected_previous_manifest_asset }}"
 
           test -f "$PREVIOUS_MANIFEST_PATH"
+
+      - name: Display selected promotion evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+      
+          echo "Selected previous manifest:"
+          echo "${{ needs.resolve-context.outputs.selected_previous_manifest_asset }}"
+      
+          jq '{
+            environment,
+            artifact_role: .evidence_storage.artifact_role,
+            artifact_name: .evidence_storage.artifact_name,
+            operation_status: .operation.status
+          }' \
+          "${{ needs.resolve-context.outputs.selected_previous_manifest_asset }}"
 
       - name: Run promotion validator
         shell: bash
@@ -196,11 +226,13 @@ jobs:
           set -euo pipefail
 
           command=(
-            python scripts/promotion_validator.py
-            --target-environment "$TARGET_ENVIRONMENT"
-            --release-id "$RELEASE_ID"
-            --artifact-hash "$ARTIFACT_HASH"
-          )
+            python scripts/promotion_validator.py \
+            --target-environment "${{ needs.resolve-context.outputs.target_environment }}" \
+            --release-id "${{ inputs.release_id }}" \
+            --artifact-hash "${{ needs.verify-release.outputs.artifact_hash }}" \
+            --previous-manifest-path \
+              "${{ needs.resolve-context.outputs.selected_previous_manifest_asset }}"
+              )
 
           if [[ -n "$PREVIOUS_MANIFEST_PATH" ]]; then
             command+=(--previous-manifest-path "$PREVIOUS_MANIFEST_PATH")
