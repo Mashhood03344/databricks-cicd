@@ -49,6 +49,7 @@ jobs:
       github_environment: ${{ steps.context.outputs.github_environment }}
       workspace_target: ${{ steps.context.outputs.workspace_target }}
       previous_environment: ${{ steps.context.outputs.previous_environment }}
+      selected_previous_manifest_asset: ${{ steps.context.outputs.selected_previous_manifest_asset }}
       previous_manifest_path: ${{ steps.context.outputs.previous_manifest_path }}
       canonical_manifest_name: ${{ steps.names.outputs.canonical_manifest_name }}
       historical_manifest_name: ${{ steps.names.outputs.historical_manifest_name }}
