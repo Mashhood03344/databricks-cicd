@@ -190,14 +190,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ needs.verify-release.outputs.release_id }}
-          PREVIOUS_MANIFEST_PATH: ${{ needs.resolve-context.outputs.previous_manifest_path }}
+          PREVIOUS_MANIFEST_PATH: ${{ needs.resolve-context.outputs.selected_previous_manifest_asset }}
         run: |
           set -euo pipefail
 
           gh release download "${{ inputs.release_id }}" \
             --repo "$GITHUB_REPOSITORY" \
             --dir . \
-            --pattern "${{ needs.resolve-context.outputs.selected_previous_manifest_asset }}"
+            --pattern "$PREVIOUS_MANIFEST_PATH"
 
           test -f "$PREVIOUS_MANIFEST_PATH"
 
