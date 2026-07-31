@@ -88,28 +88,29 @@ jobs:
       
           echo "selected_previous_manifest_asset=$previous_manifest_asset" \
             >> "$GITHUB_OUTPUT"
-            - name: Resolve orchestration names
-              id: names
-              shell: bash
-              env:
-                TARGET_ENVIRONMENT: ${{ steps.context.outputs.target_environment }}
-              run: |
-                set -euo pipefail
-      
-                case "$TARGET_ENVIRONMENT" in
-                  dev)  TARGET_BRANCH="dev" ;;
-                  uat)  TARGET_BRANCH="qa" ;;
-                  prod) TARGET_BRANCH="main" ;;
-                  *)
-                    echo "Unsupported target environment: $TARGET_ENVIRONMENT" >&2
-                    exit 1
-                    ;;
-                esac
-      
-                echo "canonical_manifest_name=${TARGET_ENVIRONMENT}-deployment-manifest.json" >> "$GITHUB_OUTPUT"
-                echo "historical_manifest_name=${TARGET_ENVIRONMENT}-deployment-manifest-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}.json" >> "$GITHUB_OUTPUT"
-                echo "target_branch=${TARGET_BRANCH}" >> "$GITHUB_OUTPUT"
+            
+      - name: Resolve orchestration names
+        id: names
+        shell: bash
+        env:
+          TARGET_ENVIRONMENT: ${{ steps.context.outputs.target_environment }}
+        run: |
+          set -euo pipefail
 
+          case "$TARGET_ENVIRONMENT" in
+            dev)  TARGET_BRANCH="dev" ;;
+            uat)  TARGET_BRANCH="qa" ;;
+            prod) TARGET_BRANCH="main" ;;
+            *)
+              echo "Unsupported target environment: $TARGET_ENVIRONMENT" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "canonical_manifest_name=${TARGET_ENVIRONMENT}-deployment-manifest.json" >> "$GITHUB_OUTPUT"
+          echo "historical_manifest_name=${TARGET_ENVIRONMENT}-deployment-manifest-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}.json" >> "$GITHUB_OUTPUT"
+          echo "target_branch=${TARGET_BRANCH}" >> "$GITHUB_OUTPUT"
+            
   verify-release:
     name: Verify Immutable Release
     runs-on: ubuntu-latest
