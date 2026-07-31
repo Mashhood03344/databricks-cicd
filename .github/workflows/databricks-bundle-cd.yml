@@ -223,7 +223,7 @@ jobs:
           TARGET_ENVIRONMENT: ${{ needs.resolve-context.outputs.target_environment }}
           RELEASE_ID: ${{ needs.verify-release.outputs.release_id }}
           ARTIFACT_HASH: ${{ needs.verify-release.outputs.artifact_hash }}
-          PREVIOUS_MANIFEST_PATH: ${{ needs.resolve-context.outputs.selected_previous_manifest_asset }}
+          PREVIOUS_MANIFEST_PATH: ${{ needs.resolve-context.outputs.previous_manifest_path }}
         run: |
           set -euo pipefail
 
