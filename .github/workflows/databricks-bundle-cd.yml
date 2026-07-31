@@ -4,10 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       release_id:
-        description: Immutable GitHub Release ID
+        description: "Release ID in format rc-YYYYMMDD-GITHUB_RUN_ID, for example rc-20260731-123456789"
         required: true
         type: string
-
       target_environment:
         description: Target deployment environment
         required: true
@@ -17,14 +16,27 @@ on:
           - uat
           - prod
 
+# Do not cancel an active deployment when another deployment is dispatched.
+concurrency:
+  group: databricks-cd
+  cancel-in-progress: false
+  queue: max
+
+permissions: {}
+
+env:
+  BUNDLE_NAME: databricks-cicd-bundle-poc
+  RELEASE_DIR: release-package
+  BUNDLE_DIR: bundle-source
+  EVIDENCE_DIR: deployment-evidence
+  DEPLOY_TIMEOUT_SECONDS: "2700"
+
 jobs:
   resolve-context:
     name: Resolve CD Context
     runs-on: ubuntu-latest
-
     permissions:
       contents: read
-
     outputs:
       target_environment: ${{ steps.context.outputs.target_environment }}
       release_id: ${{ steps.context.outputs.release_id }}
@@ -33,8 +45,9 @@ jobs:
       workspace_target: ${{ steps.context.outputs.workspace_target }}
       previous_environment: ${{ steps.context.outputs.previous_environment }}
       previous_manifest_path: ${{ steps.context.outputs.previous_manifest_path }}
-      deployment_manifest_name: ${{ steps.context.outputs.deployment_manifest_name }}
-
+      canonical_manifest_name: ${{ steps.names.outputs.canonical_manifest_name }}
+      historical_manifest_name: ${{ steps.names.outputs.historical_manifest_name }}
+      target_branch: ${{ steps.names.outputs.target_branch }}
     steps:
       - name: Checkout trusted repository scripts
         uses: actions/checkout@v4
@@ -44,71 +57,68 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           chmod +x scripts/cd_resolve_context.sh
-
           scripts/cd_resolve_context.sh \
             "${{ inputs.target_environment }}" \
             "${{ inputs.release_id }}" \
             >> "$GITHUB_OUTPUT"
 
-  verify-release:
-    name: Download and Verify Immutable Release
-    runs-on: ubuntu-latest
-    needs:
-      - resolve-context
+      - name: Resolve orchestration names
+        id: names
+        shell: bash
+        env:
+          TARGET_ENVIRONMENT: ${{ steps.context.outputs.target_environment }}
+        run: |
+          set -euo pipefail
 
+          case "$TARGET_ENVIRONMENT" in
+            dev)  TARGET_BRANCH="dev" ;;
+            uat)  TARGET_BRANCH="qa" ;;
+            prod) TARGET_BRANCH="main" ;;
+            *)
+              echo "Unsupported target environment: $TARGET_ENVIRONMENT" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "canonical_manifest_name=${TARGET_ENVIRONMENT}-deployment-manifest.json" >> "$GITHUB_OUTPUT"
+          echo "historical_manifest_name=${TARGET_ENVIRONMENT}-deployment-manifest-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}.json" >> "$GITHUB_OUTPUT"
+          echo "target_branch=${TARGET_BRANCH}" >> "$GITHUB_OUTPUT"
+
+  verify-release:
+    name: Verify Immutable Release
+    runs-on: ubuntu-latest
+    needs: resolve-context
     permissions:
       contents: read
-
     outputs:
       release_id: ${{ steps.verify.outputs.release_id }}
       artifact_name: ${{ steps.verify.outputs.artifact_name }}
       artifact_hash: ${{ steps.verify.outputs.artifact_hash }}
-      release_asset_name: ${{ steps.verify.outputs.release_asset_name }}
       repository: ${{ steps.verify.outputs.repository }}
       source_branch: ${{ steps.verify.outputs.source_branch }}
       commit_sha: ${{ steps.verify.outputs.commit_sha }}
-      workflow_run_id: ${{ steps.verify.outputs.workflow_run_id }}
-      workflow_run_number: ${{ steps.verify.outputs.workflow_run_number }}
-      created_at_utc: ${{ steps.verify.outputs.created_at_utc }}
-
     steps:
       - name: Checkout trusted repository scripts
         uses: actions/checkout@v4
 
-      - name: Create release download directory
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p release-package
-
-      - name: Download immutable GitHub Release assets
+      - name: Download immutable release assets
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ needs.resolve-context.outputs.release_id }}
-          ARTIFACT_NAME: ${{ needs.resolve-context.outputs.release_id }}.zip
         run: |
           set -euo pipefail
+          mkdir -p "$RELEASE_DIR"
 
-          gh release download "${RELEASE_ID}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --dir release-package \
-            --pattern "${ARTIFACT_NAME}" \
+          gh release download "$RELEASE_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$RELEASE_DIR" \
+            --pattern "${RELEASE_ID}.zip" \
             --pattern "release_manifest.json"
 
-          test -f "release-package/${ARTIFACT_NAME}"
-
-          test -f "release-package/release_manifest.json"
-
-          echo "Release artifact and release manifest downloaded successfully."
-
-      - name: Display downloaded release assets
-        shell: bash
-        run: |
-          set -euo pipefail
-          find release-package -maxdepth 1 -type f -printf '%f\n' | sort
+          test -f "$RELEASE_DIR/${RELEASE_ID}.zip"
+          test -f "$RELEASE_DIR/release_manifest.json"
 
       - name: Verify release manifest and artifact
         id: verify
@@ -117,55 +127,37 @@ jobs:
           RELEASE_ID: ${{ needs.resolve-context.outputs.release_id }}
         run: |
           set -euo pipefail
-
           chmod +x scripts/cd_verify_release_manifest.sh
 
           verification_output="$(
             scripts/cd_verify_release_manifest.sh \
-              "release-package/release_manifest.json" \
-              "${RELEASE_ID}"
+              "$RELEASE_DIR/release_manifest.json" \
+              "$RELEASE_ID"
           )"
 
-          printf '%s\n' "${verification_output}"
-
-          printf '%s\n' "${verification_output}" \
+          printf '%s\n' "$verification_output"
+          printf '%s\n' "$verification_output" \
             | grep -E '^[a-z_]+=' \
             >> "$GITHUB_OUTPUT"
 
-      - name: Confirm verified release identity
-        shell: bash
-        env:
-          VERIFIED_RELEASE_ID: ${{ steps.verify.outputs.release_id }}
-          VERIFIED_ARTIFACT_NAME: ${{ steps.verify.outputs.artifact_name }}
-          VERIFIED_ARTIFACT_HASH: ${{ steps.verify.outputs.artifact_hash }}
-        run: |
-          set -euo pipefail
-
-          echo "Verified release ID: ${VERIFIED_RELEASE_ID}"
-          echo "Verified artifact name: ${VERIFIED_ARTIFACT_NAME}"
-          echo "Verified artifact hash: ${VERIFIED_ARTIFACT_HASH}"
-
   validate-promotion:
-    name: Validate Release Promotion
+    name: Validate Promotion
     runs-on: ubuntu-latest
-
     needs:
       - resolve-context
       - verify-release
-
     permissions:
       contents: read
-
-    outputs:
-      decision: ${{ steps.read-result.outputs.decision }}
-      valid: ${{ steps.read-result.outputs.valid }}
-      result_file: ${{ steps.read-result.outputs.result_file }}
-
     steps:
       - name: Checkout trusted repository scripts
         uses: actions/checkout@v4
 
-      - name: Download previous deployment evidence
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download canonical previous-environment evidence
         if: needs.resolve-context.outputs.previous_environment != ''
         shell: bash
         env:
@@ -175,15 +167,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          gh release download "${RELEASE_ID}" \
-            --repo "${GITHUB_REPOSITORY}" \
+          gh release download "$RELEASE_ID" \
+            --repo "$GITHUB_REPOSITORY" \
             --dir . \
-            --pattern "${PREVIOUS_MANIFEST_PATH}"
+            --pattern "$PREVIOUS_MANIFEST_PATH"
 
-          test -f "${PREVIOUS_MANIFEST_PATH}"
-
-          echo "Downloaded previous deployment evidence:"
-          echo "${PREVIOUS_MANIFEST_PATH}"
+          test -f "$PREVIOUS_MANIFEST_PATH"
 
       - name: Run promotion validator
         shell: bash
@@ -195,112 +184,57 @@ jobs:
         run: |
           set -euo pipefail
 
-          validator_command=(
+          command=(
             python scripts/promotion_validator.py
-            --target-environment "${TARGET_ENVIRONMENT}"
-            --release-id "${RELEASE_ID}"
-            --artifact-hash "${ARTIFACT_HASH}"
+            --target-environment "$TARGET_ENVIRONMENT"
+            --release-id "$RELEASE_ID"
+            --artifact-hash "$ARTIFACT_HASH"
           )
 
-          if [ -n "${PREVIOUS_MANIFEST_PATH}" ]; then
-            validator_command+=(
-              --previous-manifest-path "${PREVIOUS_MANIFEST_PATH}"
-            )
+          if [[ -n "$PREVIOUS_MANIFEST_PATH" ]]; then
+            command+=(--previous-manifest-path "$PREVIOUS_MANIFEST_PATH")
           fi
 
-          printf 'Running promotion validation for environment: %s\n' \
-            "${TARGET_ENVIRONMENT}"
+          "${command[@]}"
 
-          "${validator_command[@]}"
-
-      - name: Read promotion validation result
-        id: read-result
+      - name: Confirm promotion decision
         shell: bash
         env:
           TARGET_ENVIRONMENT: ${{ needs.resolve-context.outputs.target_environment }}
         run: |
           set -euo pipefail
+          result_file="${TARGET_ENVIRONMENT}-promotion-validation-result.json"
+          test -f "$result_file"
+          jq -e '.valid == true and .decision == "PROMOTION_VALID"' "$result_file" >/dev/null
+          jq '{decision, valid, target_environment, release_id, artifact_hash, previous_environment, message, checks}' "$result_file"
 
-          RESULT_FILE="${TARGET_ENVIRONMENT}-promotion-validation-result.json"
-
-          if [ ! -f "${RESULT_FILE}" ]; then
-            echo "Promotion validation result was not created: ${RESULT_FILE}" >&2
-            exit 1
-          fi
-
-          DECISION="$(jq -r '.decision // empty' "${RESULT_FILE}")"
-          VALID="$(jq -r '.valid // empty' "${RESULT_FILE}")"
-
-          if [ -z "${DECISION}" ]; then
-            echo "Promotion decision is missing from ${RESULT_FILE}" >&2
-            exit 1
-          fi
-
-          if [ "${VALID}" != "true" ] && [ "${VALID}" != "false" ]; then
-            echo "Promotion valid field is invalid: ${VALID}" >&2
-            exit 1
-          fi
-
-          echo "decision=${DECISION}" >> "$GITHUB_OUTPUT"
-          echo "valid=${VALID}" >> "$GITHUB_OUTPUT"
-          echo "result_file=${RESULT_FILE}" >> "$GITHUB_OUTPUT"
-
-          echo "Promotion decision: ${DECISION}"
-          echo "Promotion valid: ${VALID}"
-
-          if [ "${VALID}" != "true" ]; then
-            echo "Promotion validation did not approve deployment." >&2
-            exit 1
-          fi
-
-      - name: Display promotion validation checks
-        shell: bash
-        env:
-          RESULT_FILE: ${{ steps.read-result.outputs.result_file }}
-        run: |
-          set -euo pipefail
-
-          test -n "${RESULT_FILE}"
-          test -f "${RESULT_FILE}"
-
-          jq '{
-            decision,
-            valid,
-            target_environment,
-            release_id,
-            artifact_hash,
-            previous_environment,
-            message,
-            checks
-          }' "${RESULT_FILE}"
-
-  validate-and-deploy-bundle:
-    name: Extract, Validate and Deploy Databricks Bundle
+  deploy:
+    name: Deploy and Publish Evidence
     runs-on: ubuntu-latest
-
     needs:
       - resolve-context
       - verify-release
       - validate-promotion
-
     permissions:
       contents: write
-
     environment: ${{ needs.resolve-context.outputs.github_environment }}
-
+    timeout-minutes: 60
     steps:
       - name: Checkout trusted repository scripts
         uses: actions/checkout@v4
 
-      - name: Create bundle working directories
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Create working directories
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p "$RELEASE_DIR" "$BUNDLE_DIR" "$EVIDENCE_DIR"
 
-          mkdir -p release-package
-          mkdir -p bundle-source
-
-      - name: Download immutable release for deployment
+      - name: Download immutable release on deployment runner
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -309,17 +243,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          gh release download "${RELEASE_ID}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --dir release-package \
-            --pattern "${ARTIFACT_NAME}" \
+          gh release download "$RELEASE_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$RELEASE_DIR" \
+            --pattern "$ARTIFACT_NAME" \
             --pattern "release_manifest.json"
 
-          test -f "release-package/${ARTIFACT_NAME}"
-          test -f "release-package/release_manifest.json"
-
-          echo "Downloaded deployment artifact: ${ARTIFACT_NAME}"
-          echo "Downloaded release manifest: release_manifest.json"
+          test -f "$RELEASE_DIR/$ARTIFACT_NAME"
+          test -f "$RELEASE_DIR/release_manifest.json"
 
       - name: Reverify release on deployment runner
         id: deployment-verification
@@ -328,21 +259,18 @@ jobs:
           RELEASE_ID: ${{ needs.verify-release.outputs.release_id }}
         run: |
           set -euo pipefail
-
           chmod +x scripts/cd_verify_release_manifest.sh
 
           verification_output="$(
             scripts/cd_verify_release_manifest.sh \
-              "release-package/release_manifest.json" \
-              "${RELEASE_ID}"
+              "$RELEASE_DIR/release_manifest.json" \
+              "$RELEASE_ID"
           )"
 
-          printf '%s\n' "${verification_output}"
-
-          printf '%s\n' "${verification_output}" \
+          printf '%s\n' "$verification_output"
+          printf '%s\n' "$verification_output" \
             | grep -E '^[a-z_]+=' \
             >> "$GITHUB_OUTPUT"
-
 
       - name: Confirm deployment artifact matches approved release
         shell: bash
@@ -350,38 +278,14 @@ jobs:
           APPROVED_RELEASE_ID: ${{ needs.verify-release.outputs.release_id }}
           APPROVED_ARTIFACT_NAME: ${{ needs.verify-release.outputs.artifact_name }}
           APPROVED_ARTIFACT_HASH: ${{ needs.verify-release.outputs.artifact_hash }}
-          DEPLOYMENT_RELEASE_ID: ${{ steps.deployment-verification.outputs.release_id }}
-          DEPLOYMENT_ARTIFACT_NAME: ${{ steps.deployment-verification.outputs.artifact_name }}
-          DEPLOYMENT_ARTIFACT_HASH: ${{ steps.deployment-verification.outputs.artifact_hash }}
+          ACTUAL_RELEASE_ID: ${{ steps.deployment-verification.outputs.release_id }}
+          ACTUAL_ARTIFACT_NAME: ${{ steps.deployment-verification.outputs.artifact_name }}
+          ACTUAL_ARTIFACT_HASH: ${{ steps.deployment-verification.outputs.artifact_hash }}
         run: |
           set -euo pipefail
-
-          if [ "${DEPLOYMENT_RELEASE_ID}" != "${APPROVED_RELEASE_ID}" ]; then
-            echo "Deployment release ID does not match the approved release ID." >&2
-            echo "Approved:   ${APPROVED_RELEASE_ID}" >&2
-            echo "Downloaded: ${DEPLOYMENT_RELEASE_ID}" >&2
-            exit 1
-          fi
-
-          if [ "${DEPLOYMENT_ARTIFACT_NAME}" != "${APPROVED_ARTIFACT_NAME}" ]; then
-            echo "Deployment artifact name does not match the approved artifact name." >&2
-            echo "Approved:   ${APPROVED_ARTIFACT_NAME}" >&2
-            echo "Downloaded: ${DEPLOYMENT_ARTIFACT_NAME}" >&2
-            exit 1
-          fi
-
-          if [ "${DEPLOYMENT_ARTIFACT_HASH}" != "${APPROVED_ARTIFACT_HASH}" ]; then
-            echo "Deployment artifact hash does not match the approved artifact hash." >&2
-            echo "Approved:   ${APPROVED_ARTIFACT_HASH}" >&2
-            echo "Downloaded: ${DEPLOYMENT_ARTIFACT_HASH}" >&2
-            exit 1
-          fi
-
-          echo "Deployment release identity confirmed."
-          echo "Release ID: ${DEPLOYMENT_RELEASE_ID}"
-          echo "Artifact: ${DEPLOYMENT_ARTIFACT_NAME}"
-          echo "Hash: ${DEPLOYMENT_ARTIFACT_HASH}"
-
+          test "$ACTUAL_RELEASE_ID" = "$APPROVED_RELEASE_ID"
+          test "$ACTUAL_ARTIFACT_NAME" = "$APPROVED_ARTIFACT_NAME"
+          test "$ACTUAL_ARTIFACT_HASH" = "$APPROVED_ARTIFACT_HASH"
 
       - name: Extract immutable release artifact
         shell: bash
@@ -389,107 +293,13 @@ jobs:
           ARTIFACT_NAME: ${{ needs.verify-release.outputs.artifact_name }}
         run: |
           set -euo pipefail
-
-          unzip -q \
-            "release-package/${ARTIFACT_NAME}" \
-            -d bundle-source
-
-          echo "Extracted immutable release artifact."
-
-      - name: Validate extracted bundle structure
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ ! -f "bundle-source/databricks.yml" ]; then
-            echo "databricks.yml was not found in the immutable release artifact." >&2
-            exit 1
-          fi
-
-          echo "Bundle configuration found:"
-          echo "bundle-source/databricks.yml"
-
-          find bundle-source \
-            -maxdepth 2 \
-            -type f \
-            -printf '%P\n' \
-            | sort
+          unzip -q "$RELEASE_DIR/$ARTIFACT_NAME" -d "$BUNDLE_DIR"
+          test -f "$BUNDLE_DIR/databricks.yml"
 
       - name: Set up Databricks CLI
         uses: databricks/setup-cli@main
 
-      - name: Display Databricks CLI version
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          databricks version
-
-      - name: Validate Databricks authentication
-        shell: bash
-        working-directory: bundle-source
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
-          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
-          DATABRICKS_AUTH_TYPE: oauth-m2m
-        run: |
-          set -euo pipefail
-
-          databricks current-user me \
-            --output json \
-            | jq '{
-                userName,
-                displayName,
-                active
-              }'
-
-      - name: Validate Databricks bundle
-        shell: bash
-        working-directory: bundle-source
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
-          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
-          DATABRICKS_AUTH_TYPE: oauth-m2m
-          BUNDLE_TARGET: ${{ needs.resolve-context.outputs.bundle_target }}
-        run: |
-          set -euo pipefail
-
-          databricks bundle validate \
-            --target "${BUNDLE_TARGET}"
-
-
-      - name: Capture deployment start time
-        id: deployment-start
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-
-          echo "started_at=${STARTED_AT}" >> "$GITHUB_OUTPUT"
-
-
-      - name: Deploy Databricks bundle
-        shell: bash
-        working-directory: bundle-source
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
-          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
-          DATABRICKS_AUTH_TYPE: oauth-m2m
-          BUNDLE_TARGET: ${{ needs.resolve-context.outputs.bundle_target }}
-        run: |
-          set -euo pipefail
-
-          databricks bundle deploy \
-            --target "${BUNDLE_TARGET}"
-
-          echo "Databricks bundle deployment completed for target: ${BUNDLE_TARGET}"
-
-
-      - name: Resolve authenticated principal
+      - name: Validate authentication and resolve principal
         id: principal
         shell: bash
         env:
@@ -500,23 +310,155 @@ jobs:
         run: |
           set -euo pipefail
 
-          PRINCIPAL="$(
-            databricks current-user me \
-              --output json \
-              | jq -r '.userName'
-          )"
+          principal="$(databricks current-user me --output json | jq -r '.userName // empty')"
+          test -n "$principal"
+          echo "principal=$principal" >> "$GITHUB_OUTPUT"
 
-          if [ -z "${PRINCIPAL}" ] || [ "${PRINCIPAL}" = "null" ]; then
-            echo "Unable to resolve authenticated principal." >&2
-            exit 1
-          fi
-
-          echo "principal=${PRINCIPAL}" >> "$GITHUB_OUTPUT"
-
-
-      - name: Generate deployment manifest
+      - name: Validate extracted Databricks bundle
         shell: bash
         working-directory: bundle-source
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          DATABRICKS_AUTH_TYPE: oauth-m2m
+          BUNDLE_TARGET: ${{ needs.resolve-context.outputs.bundle_target }}
+        run: |
+          set -euo pipefail
+          databricks bundle validate --target "$BUNDLE_TARGET"
+
+      - name: Initialize deployment attempt
+        id: attempt
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          started_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          deployment_id="github-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}-${{ needs.resolve-context.outputs.target_environment }}"
+
+          cat > "$RUNNER_TEMP/deployment-outcome.env" <<EOF
+          OPERATION_STATUS=FAILED
+          OPERATION_EXIT_CODE=1
+          FAILURE_REASON=UNKNOWN_DEPLOYMENT_FAILURE
+          STARTED_AT=$started_at
+          COMPLETED_AT=$started_at
+          EOF
+
+          echo "deployment_id=$deployment_id" >> "$GITHUB_OUTPUT"
+          echo "started_at=$started_at" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy Databricks bundle and capture outcome
+        id: deploy-command
+        continue-on-error: true
+        shell: bash
+        working-directory: bundle-source
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          DATABRICKS_AUTH_TYPE: oauth-m2m
+          BUNDLE_TARGET: ${{ needs.resolve-context.outputs.bundle_target }}
+        run: |
+          set +e
+
+          outcome_file="$RUNNER_TEMP/deployment-outcome.env"
+          started_at="${{ steps.attempt.outputs.started_at }}"
+
+          record_cancelled() {
+            completed_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            cat > "$outcome_file" <<EOF
+          OPERATION_STATUS=FAILED
+          OPERATION_EXIT_CODE=130
+          FAILURE_REASON=DEPLOY_CANCELLED
+          STARTED_AT=$started_at
+          COMPLETED_AT=$completed_at
+          EOF
+            exit 130
+          }
+
+          trap record_cancelled INT TERM
+
+          timeout \
+            --signal=TERM \
+            --kill-after=30s \
+            "${DEPLOY_TIMEOUT_SECONDS}s" \
+            databricks bundle deploy --target "$BUNDLE_TARGET"
+          exit_code=$?
+          completed_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          case "$exit_code" in
+            0)
+              operation_status="SUCCESS"
+              failure_reason=""
+              ;;
+            124|137)
+              operation_status="FAILED"
+              failure_reason="DEPLOY_TIMEOUT"
+              ;;
+            130|143)
+              operation_status="FAILED"
+              failure_reason="DEPLOY_CANCELLED"
+              ;;
+            *)
+              operation_status="FAILED"
+              failure_reason="DEPLOY_COMMAND_FAILED"
+              ;;
+          esac
+
+          cat > "$outcome_file" <<EOF
+          OPERATION_STATUS=$operation_status
+          OPERATION_EXIT_CODE=$exit_code
+          FAILURE_REASON=$failure_reason
+          STARTED_AT=$started_at
+          COMPLETED_AT=$completed_at
+          EOF
+
+          # Keep this step non-fatal. Evidence publication and the final gate
+          # decide the workflow result after the outcome has been recorded.
+          exit 0
+
+      - name: Normalize deployment outcome
+        id: outcome
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          outcome_file="$RUNNER_TEMP/deployment-outcome.env"
+          test -f "$outcome_file"
+          source "$outcome_file"
+
+          case "$OPERATION_STATUS" in
+            SUCCESS)
+              test "$OPERATION_EXIT_CODE" = "0"
+              FAILURE_REASON=""
+              ;;
+            FAILED)
+              if ! [[ "$OPERATION_EXIT_CODE" =~ ^[1-9][0-9]*$ ]]; then
+                OPERATION_EXIT_CODE=1
+                FAILURE_REASON=UNKNOWN_DEPLOYMENT_FAILURE
+              fi
+              case "$FAILURE_REASON" in
+                DEPLOY_COMMAND_FAILED|DEPLOY_TIMEOUT|DEPLOY_CANCELLED|UNKNOWN_DEPLOYMENT_FAILURE) ;;
+                *) FAILURE_REASON=UNKNOWN_DEPLOYMENT_FAILURE ;;
+              esac
+              ;;
+            *)
+              OPERATION_STATUS=FAILED
+              OPERATION_EXIT_CODE=1
+              FAILURE_REASON=UNKNOWN_DEPLOYMENT_FAILURE
+              ;;
+          esac
+
+          echo "operation_status=$OPERATION_STATUS" >> "$GITHUB_OUTPUT"
+          echo "operation_exit_code=$OPERATION_EXIT_CODE" >> "$GITHUB_OUTPUT"
+          echo "failure_reason=$FAILURE_REASON" >> "$GITHUB_OUTPUT"
+          echo "started_at=$STARTED_AT" >> "$GITHUB_OUTPUT"
+          echo "completed_at=$COMPLETED_AT" >> "$GITHUB_OUTPUT"
+
+      - name: Generate historical deployment evidence
+        if: ${{ always() && steps.outcome.outcome == 'success' }}
+        shell: bash
         env:
           TARGET_ENVIRONMENT: ${{ needs.resolve-context.outputs.target_environment }}
           RELEASE_ID: ${{ needs.verify-release.outputs.release_id }}
@@ -524,173 +466,174 @@ jobs:
           ARTIFACT_HASH: ${{ needs.verify-release.outputs.artifact_hash }}
           BUNDLE_TARGET: ${{ needs.resolve-context.outputs.bundle_target }}
           WORKSPACE_TARGET: ${{ needs.resolve-context.outputs.workspace_target }}
-          DEPLOYMENT_MANIFEST_NAME: ${{ needs.resolve-context.outputs.deployment_manifest_name }}
-          STARTED_AT: ${{ steps.deployment-start.outputs.started_at }}
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          SOURCE_BRANCH: ${{ needs.verify-release.outputs.source_branch }}
+          TARGET_BRANCH: ${{ needs.resolve-context.outputs.target_branch }}
+          COMMIT_SHA: ${{ needs.verify-release.outputs.commit_sha }}
           AUTHENTICATED_PRINCIPAL: ${{ steps.principal.outputs.principal }}
-          TRUSTED_SCRIPTS_DIR: ${{ github.workspace }}/scripts
-          BUNDLE_SOURCE_DIR: ${{ github.workspace }}/bundle-source
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          OPERATION_STATUS: ${{ steps.outcome.outputs.operation_status }}
+          OPERATION_EXIT_CODE: ${{ steps.outcome.outputs.operation_exit_code }}
+          FAILURE_REASON: ${{ steps.outcome.outputs.failure_reason }}
+          STARTED_AT: ${{ steps.outcome.outputs.started_at }}
         run: |
           set -euo pipefail
 
-          TRUSTED_MANIFEST_SCRIPT="${TRUSTED_SCRIPTS_DIR}/deployment_manifest.py"
-          DEPLOYMENT_MANIFEST_PATH="${BUNDLE_SOURCE_DIR}/${DEPLOYMENT_MANIFEST_NAME}"
+          workspace_root_path="/Workspace/Users/${AUTHENTICATED_PRINCIPAL}/.bundle/${BUNDLE_NAME}/${BUNDLE_TARGET}"
 
-          test -d "${TRUSTED_SCRIPTS_DIR}"
-          test -d "${BUNDLE_SOURCE_DIR}"
-          test -f "${TRUSTED_MANIFEST_SCRIPT}"
+          command=(
+            python scripts/deployment_manifest.py
+            --deployment-id "${{ steps.attempt.outputs.deployment_id }}"
+            --environment "$TARGET_ENVIRONMENT"
+            --release-id "$RELEASE_ID"
+            --artifact-name "$ARTIFACT_NAME"
+            --artifact-hash "$ARTIFACT_HASH"
+            --bundle-name "$BUNDLE_NAME"
+            --bundle-target "$BUNDLE_TARGET"
+            --workspace-target "$WORKSPACE_TARGET"
+            --workspace-root-path "$workspace_root_path"
+            --authenticated-principal "$AUTHENTICATED_PRINCIPAL"
+            --started-at "$STARTED_AT"
+            --operation-status "$OPERATION_STATUS"
+            --operation-exit-code "$OPERATION_EXIT_CODE"
+            --source-branch "$SOURCE_BRANCH"
+            --target-branch "$TARGET_BRANCH"
+            --commit-sha "$COMMIT_SHA"
+            --commit-message "Deploy immutable release $RELEASE_ID"
+            --github-repository "$GITHUB_REPOSITORY"
+            --github-actor "$GITHUB_ACTOR"
+            --github-workflow "$GITHUB_WORKFLOW"
+            --github-run-id "$GITHUB_RUN_ID"
+            --github-run-number "$GITHUB_RUN_NUMBER"
+            --github-run-attempt "$GITHUB_RUN_ATTEMPT"
+            --github-job "$GITHUB_JOB"
+            --github-event-name "$GITHUB_EVENT_NAME"
+            --evidence-role historical
+            --databricks-host "$DATABRICKS_HOST"
+            --output-directory "$EVIDENCE_DIR"
+          )
 
-          echo "=== Deployment manifest runtime diagnostics ==="
+          if [[ "$OPERATION_STATUS" = "FAILED" ]]; then
+            command+=(--failure-reason "$FAILURE_REASON")
+          fi
 
-          echo "Current directory:"
-          pwd
+          "${command[@]}"
 
-          echo "Repository commit:"
-          git -C "${GITHUB_WORKSPACE}" rev-parse HEAD
+          test -f "$EVIDENCE_DIR/${{ needs.resolve-context.outputs.historical_manifest_name }}"
+          jq . "$EVIDENCE_DIR/${{ needs.resolve-context.outputs.historical_manifest_name }}"
 
-          echo "Trusted scripts directory:"
-          printf '%s\n' "${TRUSTED_SCRIPTS_DIR}"
-
-          echo "Bundle source directory:"
-          printf '%s\n' "${BUNDLE_SOURCE_DIR}"
-
-          echo "Trusted deployment manifest script:"
-          realpath "${TRUSTED_MANIFEST_SCRIPT}"
-
-          echo "Retention parser implementation:"
-          grep -n -A8 -B3 \
-            "evidence-artifact-retention-days" \
-            "${TRUSTED_MANIFEST_SCRIPT}"
-
-          echo "optional_int implementation:"
-          grep -n -A15 \
-            "def optional_int" \
-            "${TRUSTED_MANIFEST_SCRIPT}" || true
-
-          echo "Trusted script CLI help:"
-          python "${TRUSTED_MANIFEST_SCRIPT}" --help
-
-          DEPLOYMENT_ID="github-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}-${TARGET_ENVIRONMENT}"
-
-          case "${TARGET_ENVIRONMENT}" in
-            dev)
-              TARGET_BRANCH="dev"
-              ;;
-            uat)
-              TARGET_BRANCH="qa"
-              ;;
-            prod)
-              TARGET_BRANCH="main"
-              ;;
-            *)
-              echo "Unsupported target environment: ${TARGET_ENVIRONMENT}" >&2
-              exit 1
-              ;;
-          esac
-
-          echo "Resolved deployment branch mapping:"
-          echo "Target environment: ${TARGET_ENVIRONMENT}"
-          echo "Target branch: ${TARGET_BRANCH}"
-
-          WORKSPACE_ROOT_PATH="/Workspace/Users/${AUTHENTICATED_PRINCIPAL}/.bundle/databricks-cicd-bundle-poc/${BUNDLE_TARGET}"
-
-          python "${TRUSTED_MANIFEST_SCRIPT}" \
-            --deployment-id "${DEPLOYMENT_ID}" \
-            --environment "${TARGET_ENVIRONMENT}" \
-            --release-id "${RELEASE_ID}" \
-            --artifact-name "${ARTIFACT_NAME}" \
-            --artifact-hash "${ARTIFACT_HASH}" \
-            --bundle-name "databricks-cicd-bundle-poc" \
-            --bundle-target "${BUNDLE_TARGET}" \
-            --workspace-target "${WORKSPACE_TARGET}" \
-            --workspace-root-path "${WORKSPACE_ROOT_PATH}" \
-            --authenticated-principal "${AUTHENTICATED_PRINCIPAL}" \
-            --started-at "${STARTED_AT}" \
-            --source-branch "${{ needs.verify-release.outputs.source_branch }}" \
-            --target-branch "${TARGET_BRANCH}" \
-            --commit-sha "${{ needs.verify-release.outputs.commit_sha }}" \
-            --commit-message "Deploy immutable release ${RELEASE_ID}" \
-            --github-repository "${{ needs.verify-release.outputs.repository }}" \
-            --github-actor "${GITHUB_ACTOR}" \
-            --github-workflow "${GITHUB_WORKFLOW}" \
-            --github-run-id "${GITHUB_RUN_ID}" \
-            --github-run-number "${GITHUB_RUN_NUMBER}" \
-            --github-job "${GITHUB_JOB}" \
-            --github-event-name "${GITHUB_EVENT_NAME}" \
-            --evidence-storage-type "github_release_asset" \
-            --evidence-artifact-name "${DEPLOYMENT_MANIFEST_NAME}" \
-            --evidence-artifact-version "1.0" \
-            --evidence-artifact-retention-days null \
-            --databricks-host "${DATABRICKS_HOST}" \
-            --output-path "${DEPLOYMENT_MANIFEST_PATH}"
-
-          test -f "${DEPLOYMENT_MANIFEST_PATH}"
-
-          jq . "${DEPLOYMENT_MANIFEST_PATH}"
-
-
-      - name: Upload deployment manifest to GitHub Release
+      - name: Upload immutable historical deployment evidence
+        id: upload-historical
+        if: ${{ always() && steps.outcome.outcome == 'success' }}
         shell: bash
-        working-directory: bundle-source
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ needs.verify-release.outputs.release_id }}
-          DEPLOYMENT_MANIFEST_NAME: ${{ needs.resolve-context.outputs.deployment_manifest_name }}
+          HISTORICAL_MANIFEST_NAME: ${{ needs.resolve-context.outputs.historical_manifest_name }}
+        run: |
+          set -euo pipefail
+          evidence_path="$EVIDENCE_DIR/$HISTORICAL_MANIFEST_NAME"
+          test -f "$evidence_path"
+
+          # No --clobber: historical evidence is immutable.
+          gh release upload "$RELEASE_ID" "$evidence_path" \
+            --repo "$GITHUB_REPOSITORY"
+
+      - name: Generate canonical deployment evidence
+        if: ${{ always() && steps.outcome.outputs.operation_status == 'SUCCESS' && steps.upload-historical.outcome == 'success' }}
+        shell: bash
+        env:
+          TARGET_ENVIRONMENT: ${{ needs.resolve-context.outputs.target_environment }}
+          RELEASE_ID: ${{ needs.verify-release.outputs.release_id }}
+          ARTIFACT_NAME: ${{ needs.verify-release.outputs.artifact_name }}
+          ARTIFACT_HASH: ${{ needs.verify-release.outputs.artifact_hash }}
+          BUNDLE_TARGET: ${{ needs.resolve-context.outputs.bundle_target }}
+          WORKSPACE_TARGET: ${{ needs.resolve-context.outputs.workspace_target }}
+          SOURCE_BRANCH: ${{ needs.verify-release.outputs.source_branch }}
+          TARGET_BRANCH: ${{ needs.resolve-context.outputs.target_branch }}
+          COMMIT_SHA: ${{ needs.verify-release.outputs.commit_sha }}
+          AUTHENTICATED_PRINCIPAL: ${{ steps.principal.outputs.principal }}
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          STARTED_AT: ${{ steps.outcome.outputs.started_at }}
         run: |
           set -euo pipefail
 
-          test -f "${DEPLOYMENT_MANIFEST_NAME}"
+          workspace_root_path="/Workspace/Users/${AUTHENTICATED_PRINCIPAL}/.bundle/${BUNDLE_NAME}/${BUNDLE_TARGET}"
 
-          gh release upload "${RELEASE_ID}" \
-            "${DEPLOYMENT_MANIFEST_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
+          python scripts/deployment_manifest.py \
+            --deployment-id "${{ steps.attempt.outputs.deployment_id }}" \
+            --environment "$TARGET_ENVIRONMENT" \
+            --release-id "$RELEASE_ID" \
+            --artifact-name "$ARTIFACT_NAME" \
+            --artifact-hash "$ARTIFACT_HASH" \
+            --bundle-name "$BUNDLE_NAME" \
+            --bundle-target "$BUNDLE_TARGET" \
+            --workspace-target "$WORKSPACE_TARGET" \
+            --workspace-root-path "$workspace_root_path" \
+            --authenticated-principal "$AUTHENTICATED_PRINCIPAL" \
+            --started-at "$STARTED_AT" \
+            --operation-status SUCCESS \
+            --operation-exit-code 0 \
+            --source-branch "$SOURCE_BRANCH" \
+            --target-branch "$TARGET_BRANCH" \
+            --commit-sha "$COMMIT_SHA" \
+            --commit-message "Deploy immutable release $RELEASE_ID" \
+            --github-repository "$GITHUB_REPOSITORY" \
+            --github-actor "$GITHUB_ACTOR" \
+            --github-workflow "$GITHUB_WORKFLOW" \
+            --github-run-id "$GITHUB_RUN_ID" \
+            --github-run-number "$GITHUB_RUN_NUMBER" \
+            --github-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --github-job "$GITHUB_JOB" \
+            --github-event-name "$GITHUB_EVENT_NAME" \
+            --evidence-role canonical \
+            --databricks-host "$DATABRICKS_HOST" \
+            --output-directory "$EVIDENCE_DIR"
+
+          test -f "$EVIDENCE_DIR/${{ needs.resolve-context.outputs.canonical_manifest_name }}"
+
+      - name: Upload canonical deployment evidence
+        id: upload-canonical
+        if: ${{ always() && steps.outcome.outputs.operation_status == 'SUCCESS' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.verify-release.outputs.release_id }}
+          CANONICAL_MANIFEST_NAME: ${{ needs.resolve-context.outputs.canonical_manifest_name }}
+        run: |
+          set -euo pipefail
+          evidence_path="$EVIDENCE_DIR/$CANONICAL_MANIFEST_NAME"
+          test -f "$evidence_path"
+
+          # Canonical evidence represents the latest successful deployment.
+          gh release upload "$RELEASE_ID" "$evidence_path" \
+            --repo "$GITHUB_REPOSITORY" \
             --clobber
 
-          echo "Uploaded deployment evidence to GitHub Release."
-          echo "Release ID: ${RELEASE_ID}"
-          echo "Evidence asset: ${DEPLOYMENT_MANIFEST_NAME}"
-
-
-      - name: Verify deployment manifest publication
+      - name: Enforce final deployment result
+        if: ${{ always() }}
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ID: ${{ needs.verify-release.outputs.release_id }}
-          DEPLOYMENT_MANIFEST_NAME: ${{ needs.resolve-context.outputs.deployment_manifest_name }}
+          OPERATION_STATUS: ${{ steps.outcome.outputs.operation_status }}
+          OPERATION_EXIT_CODE: ${{ steps.outcome.outputs.operation_exit_code }}
+          FAILURE_REASON: ${{ steps.outcome.outputs.failure_reason }}
         run: |
           set -euo pipefail
 
-          LOCAL_MANIFEST="bundle-source/${DEPLOYMENT_MANIFEST_NAME}"
-          VERIFICATION_DIRECTORY="deployment-evidence-verification"
-          DOWNLOADED_MANIFEST="${VERIFICATION_DIRECTORY}/${DEPLOYMENT_MANIFEST_NAME}"
-
-          test -f "${LOCAL_MANIFEST}"
-
-          rm -rf "${VERIFICATION_DIRECTORY}"
-          mkdir -p "${VERIFICATION_DIRECTORY}"
-
-          gh release download "${RELEASE_ID}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --dir "${VERIFICATION_DIRECTORY}" \
-            --pattern "${DEPLOYMENT_MANIFEST_NAME}"
-
-          test -f "${DOWNLOADED_MANIFEST}"
-
-          if ! cmp --silent "${LOCAL_MANIFEST}" "${DOWNLOADED_MANIFEST}"; then
-            echo "Published deployment manifest does not match the generated manifest." >&2
+          if [[ "$OPERATION_STATUS" != "SUCCESS" ]]; then
+            echo "Deployment failed after historical evidence publication." >&2
+            echo "Exit code: $OPERATION_EXIT_CODE" >&2
+            echo "Failure reason: $FAILURE_REASON" >&2
             exit 1
           fi
 
-          echo "Deployment evidence publication verified."
-          echo "Release ID: ${RELEASE_ID}"
-          echo "Verified asset: ${DEPLOYMENT_MANIFEST_NAME}"
+          if [[ "${{ steps.upload-historical.outcome }}" != "success" ]]; then
+            echo "Historical deployment evidence was not published." >&2
+            exit 1
+          fi
 
-          jq '{
-            schema_version,
-            deployment_id,
-            release,
-            environment,
-            promotion,
-            evidence_storage,
-            operation
-          }' "${DOWNLOADED_MANIFEST}"
+          if [[ "${{ steps.upload-canonical.outcome }}" != "success" ]]; then
+            echo "Canonical deployment evidence was not published." >&2
+            exit 1
+          fi
+
+          echo "Deployment succeeded and both evidence roles were published."

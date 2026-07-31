@@ -2,10 +2,13 @@
 
 import argparse
 import json
+import os
 import re
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 VALID_ENVIRONMENTS = {"dev", "uat", "prod"}
@@ -13,8 +16,10 @@ VALID_SCHEMA_VERSION = "1.0"
 VALID_OPERATION_STATUSES = {"SUCCESS", "FAILED"}
 
 DECISION_PROMOTION_VALID = "PROMOTION_VALID"
+DECISION_PREVIOUS_MANIFEST_NOT_CANONICAL = (
+    "PREVIOUS_DEPLOYMENT_MANIFEST_NOT_CANONICAL"
+)
 DECISION_PREVIOUS_MANIFEST_NOT_FOUND = "PREVIOUS_DEPLOYMENT_MANIFEST_NOT_FOUND"
-DECISION_PREVIOUS_DEPLOYMENT_NOT_SUCCESSFUL = "PREVIOUS_DEPLOYMENT_NOT_SUCCESSFUL"
 DECISION_RELEASE_ID_MISMATCH = "RELEASE_ID_MISMATCH"
 DECISION_ARTIFACT_HASH_MISMATCH = "ARTIFACT_HASH_MISMATCH"
 DECISION_INVALID_MANIFEST_SCHEMA = "INVALID_MANIFEST_SCHEMA"
@@ -25,13 +30,43 @@ DECISION_PREVIOUS_ENVIRONMENT_MISMATCH = "PREVIOUS_ENVIRONMENT_MISMATCH"
 
 SUCCESS_STATUS = "SUCCESS"
 EXPECTED_OPERATION_ACTION = "bundle_deploy"
-RELEASE_ID_PATTERN = re.compile(r"^rc-\d{8}-\d+$")
-ARTIFACT_HASH_PATTERN = re.compile(r"^sha256:[a-fA-F0-9]{64}$")
 
 EXPECTED_EVIDENCE_STORAGE_TYPE = "github_release_asset"
 EXPECTED_EVIDENCE_ARTIFACT_VERSION = "1.0"
 
+VALID_FAILURE_REASONS = {
+    "DEPLOY_COMMAND_FAILED",
+    "DEPLOY_TIMEOUT",
+    "DEPLOY_CANCELLED",
+    "UNKNOWN_DEPLOYMENT_FAILURE",
+}
 
+VALID_EVIDENCE_ROLES = {
+    "canonical",
+    "historical",
+}
+
+CANONICAL_EVIDENCE_ROLE = "canonical"
+HISTORICAL_EVIDENCE_ROLE = "historical"
+
+RELEASE_ID_PATTERN = re.compile(
+    r"^rc-(\d{8})-([1-9]\d*)$"
+)
+
+ARTIFACT_HASH_PATTERN = re.compile(
+    r"^sha256:[a-f0-9]{64}$"
+)
+
+UTC_TIMESTAMP_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T"
+    r"\d{2}:\d{2}:\d{2}Z$"
+)
+
+MAX_MANIFEST_SIZE_BYTES = 1_048_576
+
+EXPECTED_LOADABLE_MANIFEST = (
+    "readable JSON within the maximum allowed size"
+)
 
 def utc_now_iso():
     return (
@@ -41,6 +76,20 @@ def utc_now_iso():
         .replace("+00:00", "Z")
     )
 
+def parse_utc_timestamp(value):
+    if (
+        not isinstance(value, str)
+        or UTC_TIMESTAMP_PATTERN.fullmatch(value) is None
+    ):
+        return None
+
+    try:
+        return datetime.strptime(
+            value,
+            "%Y-%m-%dT%H:%M:%SZ",
+        ).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 def previous_environment_for(target_environment):
     if target_environment == "dev":
@@ -49,6 +98,30 @@ def previous_environment_for(target_environment):
         return "dev"
     if target_environment == "prod":
         return "uat"
+    return None
+
+def expected_promotion_metadata(environment):
+    if environment == "dev":
+        return {
+            "from_environment": None,
+            "to_environment": "dev",
+            "required_previous_environment": None,
+        }
+
+    if environment == "uat":
+        return {
+            "from_environment": "dev",
+            "to_environment": "uat",
+            "required_previous_environment": "dev",
+        }
+
+    if environment == "prod":
+        return {
+            "from_environment": "uat",
+            "to_environment": "prod",
+            "required_previous_environment": "uat",
+        }
+
     return None
 
 
@@ -100,23 +173,105 @@ def build_result(
     }
 
 
-def write_json_atomic(output_path, data):
+def write_json_atomic(
+    output_path: str | Path,
+    data: dict,
+) -> None:
     output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    temp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    with temp_path.open("w", encoding="utf-8") as file:
-        json.dump(data, file, indent=2)
-        file.write("\n")
+    temp_path = None
 
-    temp_path.replace(output_path)
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=output_path.parent,
+            prefix=f".{output_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
 
+            temp_file.write(
+                json.dumps(data, indent=2) + "\n"
+            )
+
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+
+        temp_path.replace(output_path)
+
+    except Exception:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(
+                    missing_ok=True
+                )
+            except OSError:
+                pass
+
+        raise
+
+def write_validation_result_or_exit(
+    output_path,
+    result,
+) -> None:
+    try:
+        write_json_atomic(
+            output_path,
+            result,
+        )
+    except OSError as exc:
+        raise SystemExit(
+            "Failed to write promotion validation "
+            f"result to {output_path}: {exc}"
+        ) from exc
+
+def reject_duplicate_json_keys(pairs):
+    result = {}
+
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(
+                f"Duplicate JSON key: {key}"
+            )
+
+        result[key] = value
+
+    return result
 
 def load_manifest(path):
-    with Path(path).open("r", encoding="utf-8") as file:
-        return json.load(file)
+    manifest_path = Path(path)
 
+    with manifest_path.open("rb") as file:
+        content = file.read(
+            MAX_MANIFEST_SIZE_BYTES + 1
+        )
+
+    if len(content) > MAX_MANIFEST_SIZE_BYTES:
+        raise ValueError(
+            "Deployment manifest exceeds maximum "
+            f"allowed size of "
+            f"{MAX_MANIFEST_SIZE_BYTES} bytes"
+        )
+
+    try:
+        decoded_content = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            "Deployment manifest must contain valid UTF-8"
+        ) from exc
+
+    return json.loads(
+        decoded_content,
+        object_pairs_hook=reject_duplicate_json_keys,
+    )
+    
 
 def get_nested_value(data, path):
     current = data
@@ -138,7 +293,20 @@ def is_non_empty_string(value):
 
 
 def is_valid_release_id(value):
-    return is_non_empty_string(value) and RELEASE_ID_PATTERN.fullmatch(value) is not None
+    if (
+        not is_non_empty_string(value)
+        or RELEASE_ID_PATTERN.fullmatch(value) is None
+    ):
+        return False
+
+    date_part = value.split("-")[1]
+
+    try:
+        datetime.strptime(date_part, "%Y%m%d")
+    except ValueError:
+        return False
+
+    return True
 
 
 def is_valid_artifact_hash(value):
@@ -148,8 +316,13 @@ def is_valid_artifact_hash(value):
 def expected_artifact_name_for(release_id):
     return f"{release_id}.zip"
 
-def expected_deployment_manifest_name(environment):
-    return f"{environment}-deployment-manifest.json"
+def is_positive_integer_string(value):
+    return (
+        isinstance(value, str)
+        and value.isascii()
+        and value.isdigit()
+        and not value.startswith("0")
+    )
 
 
 def validate_required_top_level_fields(manifest):
@@ -172,6 +345,40 @@ def validate_required_top_level_fields(manifest):
             return False, f"Missing top-level field: {field}"
 
     return True, "Required top-level fields exist"
+
+def canonical_evidence_artifact_name(environment):
+    return f"{environment}-deployment-manifest.json"
+
+def historical_evidence_artifact_name(
+    environment,
+    workflow_run_id,
+    workflow_run_attempt,
+):
+    return (
+        f"{environment}-deployment-manifest"
+        f"-run-{workflow_run_id}"
+        f"-attempt-{workflow_run_attempt}.json"
+    )
+
+def expected_evidence_artifact_name(
+    artifact_role,
+    environment,
+    workflow_run_id,
+    workflow_run_attempt,
+):
+    if artifact_role == CANONICAL_EVIDENCE_ROLE:
+        return canonical_evidence_artifact_name(
+            environment
+        )
+
+    if artifact_role == HISTORICAL_EVIDENCE_ROLE:
+        return historical_evidence_artifact_name(
+            environment,
+            workflow_run_id,
+            workflow_run_attempt,
+        )
+
+    return None
 
 
 def validate_required_section_types(manifest):
@@ -202,6 +409,25 @@ def validate_required_string_field(manifest, path):
 
     return True, f"Field is valid: {field_name}"
 
+def validate_promotion_identity(
+    release_id,
+    artifact_hash,
+):
+    if not is_valid_release_id(release_id):
+        return (
+            False,
+            "release_id must match "
+            "rc-YYYYMMDD-<numeric-id>",
+        )
+
+    if not is_valid_artifact_hash(artifact_hash):
+        return (
+            False,
+            "artifact_hash must match "
+            "sha256:<64 lowercase hexadecimal characters>",
+        )
+
+    return True, None
 
 def validate_manifest_schema(manifest):
     if not isinstance(manifest, dict):
@@ -222,18 +448,41 @@ def validate_manifest_schema(manifest):
         ("release", "artifact_name"),
         ("release", "artifact_hash"),
         ("environment",),
+        ("bundle", "name"),
         ("bundle", "target"),
         ("git", "commit_sha"),
+        ("git", "commit_message"),
+        ("git", "repository"),
+        ("git", "source_branch"),
+        ("git", "target_branch"),
+        ("git", "actor"),
         ("github_actions", "workflow_run_id"),
         ("github_actions", "workflow_run_number"),
+        ("github_actions", "workflow_run_attempt"),
+        ("github_actions", "workflow_name"),
+        ("github_actions", "job_name"),
+        ("github_actions", "event_name"),
         ("evidence_storage", "storage_type"),
         ("evidence_storage", "artifact_name"),
         ("evidence_storage", "artifact_version"),
+        (
+            "evidence_storage",
+            "artifact_role",
+        ),
         ("evidence_storage", "artifact_generated_by_run_id"),
         ("evidence_storage", "artifact_generated_by_run_number"),
+        (
+            "evidence_storage",
+            "artifact_generated_by_run_attempt",
+        ),
         ("databricks", "workspace_target"),
+        ("databricks", "workspace_host"),
+        ("databricks", "authenticated_principal"),
+        ("databricks", "workspace_root_path"),
         ("operation", "action"),
         ("operation", "status"),
+        ("operation", "started_at"),
+        ("operation", "completed_at"),
     ]
 
     for path in required_string_fields:
@@ -241,6 +490,57 @@ def validate_manifest_schema(manifest):
         if not field_valid:
             return False, field_message
 
+    operation = manifest["operation"]
+
+    if "exit_code" not in operation:
+        return False, "Missing field: operation.exit_code"
+
+    if "failure_reason" not in operation:
+        return False, "Missing field: operation.failure_reason"
+
+    operation_status = operation["status"]
+    operation_exit_code = operation["exit_code"]
+    failure_reason = operation["failure_reason"]
+
+    if operation_status not in VALID_OPERATION_STATUSES:
+        return False, f"Invalid operation.status value: {operation_status}"
+
+    if (
+        not isinstance(operation_exit_code, int)
+        or isinstance(operation_exit_code, bool)
+    ):
+        return False, "operation.exit_code must be an integer"
+
+    if operation_status == "SUCCESS":
+        if operation_exit_code != 0:
+            return (
+                False,
+                "operation.exit_code must be 0 when "
+                "operation.status is SUCCESS",
+            )
+
+        if failure_reason is not None:
+            return (
+                False,
+                "operation.failure_reason must be null when "
+                "operation.status is SUCCESS",
+            )
+
+    elif operation_status == "FAILED":
+        if operation_exit_code <= 0:
+            return (
+                False,
+                "operation.exit_code must be greater than zero when "
+                "operation.status is FAILED",
+            )
+
+        if failure_reason not in VALID_FAILURE_REASONS:
+            return (
+                False,
+                "operation.failure_reason must be an approved value "
+                "when operation.status is FAILED",
+            )
+            
     schema_version = manifest["schema_version"]
     if schema_version != VALID_SCHEMA_VERSION:
         return False, f"Unsupported schema_version: {schema_version}"
@@ -248,22 +548,84 @@ def validate_manifest_schema(manifest):
     environment = manifest["environment"]
     if environment not in VALID_ENVIRONMENTS:
         return False, f"Invalid environment value: {environment}"
+    
+    promotion = manifest["promotion"]
+
+    required_promotion_fields = (
+        "from_environment",
+        "to_environment",
+        "required_previous_environment",
+    )
+
+    for field in required_promotion_fields:
+        if field not in promotion:
+            return False, f"Missing field: promotion.{field}"
+
+    expected_promotion = expected_promotion_metadata(environment)
+
+    for field, expected_value in expected_promotion.items():
+        actual_value = promotion[field]
+
+        if actual_value != expected_value:
+            return (
+                False,
+                f"Invalid promotion.{field} value: "
+                f"expected {expected_value}, actual {actual_value}",
+            )
 
     bundle_target = manifest["bundle"]["target"]
+
     if bundle_target not in VALID_ENVIRONMENTS:
         return False, f"Invalid bundle.target value: {bundle_target}"
 
+    if bundle_target != environment:
+        return False, "bundle.target must match environment"
+
     workspace_target = manifest["databricks"]["workspace_target"]
+
     if workspace_target not in VALID_ENVIRONMENTS:
-        return False, f"Invalid databricks.workspace_target value: {workspace_target}"
+        return (
+            False,
+            f"Invalid databricks.workspace_target value: {workspace_target}",
+        )
+
+    if workspace_target != environment:
+        return (
+            False,
+            "databricks.workspace_target must match environment",
+        )
+
+    workspace_host = manifest["databricks"]["workspace_host"]
+    parsed_workspace_host = urlparse(workspace_host)
+
+    try:
+        workspace_port = parsed_workspace_host.port
+    except ValueError:
+        return (
+            False,
+            "databricks.workspace_host must contain "
+            "a valid port",
+        )
+
+    if (
+        parsed_workspace_host.scheme != "https"
+        or not parsed_workspace_host.hostname
+        or parsed_workspace_host.username is not None
+        or parsed_workspace_host.password is not None
+        or workspace_port is not None
+        or parsed_workspace_host.query
+        or parsed_workspace_host.fragment
+        or parsed_workspace_host.path not in {"", "/"}
+    ):
+        return (
+            False,
+            "databricks.workspace_host must be a valid "
+            "HTTPS workspace base URL",
+        )
 
     operation_action = manifest["operation"]["action"]
     if operation_action != EXPECTED_OPERATION_ACTION:
         return False, f"Invalid operation.action value: {operation_action}"
-
-    operation_status = manifest["operation"]["status"]
-    if operation_status not in VALID_OPERATION_STATUSES:
-        return False, f"Invalid operation.status value: {operation_status}"
 
     release_id = manifest["release"]["release_id"]
     if not is_valid_release_id(release_id):
@@ -278,29 +640,79 @@ def validate_manifest_schema(manifest):
     if artifact_name != expected_artifact_name:
         return False, f"Invalid release.artifact_name value: {artifact_name}"
 
-    evidence_storage_type = manifest["evidence_storage"]["storage_type"]
+    evidence_storage = manifest[
+        "evidence_storage"
+    ]
 
-    if evidence_storage_type != EXPECTED_EVIDENCE_STORAGE_TYPE:
+    evidence_storage_type = evidence_storage[
+        "storage_type"
+    ]
+
+    artifact_role = evidence_storage[
+        "artifact_role"
+    ]
+
+    if artifact_role not in VALID_EVIDENCE_ROLES:
         return (
             False,
-            f"Invalid evidence_storage.storage_type value: "
+            "Invalid evidence_storage.artifact_role value: "
+            f"{artifact_role}",
+        )
+
+    if (
+        evidence_storage_type
+        != EXPECTED_EVIDENCE_STORAGE_TYPE
+    ):
+        return (
+            False,
+            "Invalid evidence_storage.storage_type value: "
             f"{evidence_storage_type}",
+        )
+
+    if (
+        artifact_role == CANONICAL_EVIDENCE_ROLE
+        and operation_status != SUCCESS_STATUS
+    ):
+        return (
+            False,
+            "Canonical deployment evidence may only "
+            "represent a successful deployment",
+        )
+
+    
+
+    workflow_run_id = manifest[
+        "github_actions"
+    ]["workflow_run_id"]
+
+    workflow_run_attempt = manifest[
+        "github_actions"
+    ]["workflow_run_attempt"]
+
+    expected_artifact_name = (
+        expected_evidence_artifact_name(
+            artifact_role,
+            environment,
+            workflow_run_id,
+            workflow_run_attempt,
+        )
     )
 
-    evidence_artifact_name = manifest["evidence_storage"]["artifact_name"]
+    actual_artifact_name = evidence_storage[
+        "artifact_name"
+    ]
 
-    expected_evidence_artifact_name = expected_deployment_manifest_name(
-        manifest["environment"]
-    )
-
-    if evidence_artifact_name != expected_evidence_artifact_name:
+    if actual_artifact_name != expected_artifact_name:
         return (
             False,
             "Invalid evidence_storage.artifact_name value: "
-            f"{evidence_artifact_name}",
+            f"expected {expected_artifact_name}, "
+            f"actual {actual_artifact_name}",
         )
 
-    evidence_artifact_version = manifest["evidence_storage"]["artifact_version"]
+    evidence_artifact_version = evidence_storage[
+        "artifact_version"
+    ]
 
     if evidence_artifact_version != EXPECTED_EVIDENCE_ARTIFACT_VERSION:
         return (
@@ -308,8 +720,6 @@ def validate_manifest_schema(manifest):
             "Invalid evidence_storage.artifact_version value: "
             f"{evidence_artifact_version}",
         )
-
-    evidence_storage = manifest["evidence_storage"]
 
     if "artifact_retention_days" not in evidence_storage:
         return (
@@ -324,8 +734,62 @@ def validate_manifest_schema(manifest):
             "for GitHub Release assets",
         )
     
-    workflow_run_id = manifest["github_actions"]["workflow_run_id"]
-    evidence_run_id = evidence_storage["artifact_generated_by_run_id"]
+    github_actions = manifest["github_actions"]
+
+    github_run_fields = (
+        "workflow_run_id",
+        "workflow_run_number",
+        "workflow_run_attempt",
+    )
+
+    for field in github_run_fields:
+        value = github_actions[field]
+
+        if not is_positive_integer_string(value):
+            return (
+                False,
+                f"github_actions.{field} must be a "
+                "positive integer string",
+            )
+
+    deployment_id = manifest["deployment_id"]
+    workflow_run_id = github_actions["workflow_run_id"]
+    workflow_run_attempt = github_actions["workflow_run_attempt"]
+
+    expected_deployment_id = (
+        f"github-run-{workflow_run_id}"
+        f"-attempt-{workflow_run_attempt}"
+        f"-{environment}"
+    )
+
+    if deployment_id != expected_deployment_id:
+        return (
+            False,
+            "deployment_id does not match GitHub run metadata "
+            f"and environment: expected {expected_deployment_id}, "
+            f"actual {deployment_id}",
+        )
+
+    evidence_run_fields = (
+        "artifact_generated_by_run_id",
+        "artifact_generated_by_run_number",
+        "artifact_generated_by_run_attempt",
+    )
+
+    for field in evidence_run_fields:
+        value = evidence_storage[field]
+
+        if not is_positive_integer_string(value):
+            return (
+                False,
+                f"evidence_storage.{field} must be a "
+                "positive integer string",
+            )
+
+    workflow_run_id = github_actions["workflow_run_id"]
+    evidence_run_id = evidence_storage[
+        "artifact_generated_by_run_id"
+    ]
 
     if evidence_run_id != workflow_run_id:
         return (
@@ -334,7 +798,7 @@ def validate_manifest_schema(manifest):
             "github_actions.workflow_run_id",
         )
 
-    workflow_run_number = manifest["github_actions"]["workflow_run_number"]
+    workflow_run_number = github_actions["workflow_run_number"]
     evidence_run_number = evidence_storage[
         "artifact_generated_by_run_number"
     ]
@@ -346,6 +810,37 @@ def validate_manifest_schema(manifest):
             "github_actions.workflow_run_number",
         )
 
+    workflow_run_attempt = github_actions["workflow_run_attempt"]
+    evidence_run_attempt = evidence_storage[
+        "artifact_generated_by_run_attempt"
+    ]
+
+    if evidence_run_attempt != workflow_run_attempt:
+        return (
+            False,
+            "Evidence generating run attempt does not match "
+            "github_actions.workflow_run_attempt",
+        )
+
+    started_at = operation["started_at"]
+    completed_at = operation["completed_at"]
+
+    started_at_value = parse_utc_timestamp(started_at)
+    completed_at_value = parse_utc_timestamp(completed_at)
+
+    if started_at_value is None:
+        return False, "operation.started_at must be a valid UTC timestamp"
+
+    if completed_at_value is None:
+        return False, "operation.completed_at must be a valid UTC timestamp"
+
+    if completed_at_value < started_at_value:
+        return (
+            False,
+            "operation.completed_at must not be earlier than "
+            "operation.started_at",
+        )
+
     return True, "Manifest schema is valid"
 
 
@@ -353,7 +848,10 @@ def validate_promotion(target_environment, release_id, artifact_hash, previous_m
     checks = []
     previous_environment = previous_environment_for(target_environment)
 
-    if target_environment not in VALID_ENVIRONMENTS:
+    if (
+        not isinstance(target_environment, str)
+        or target_environment not in VALID_ENVIRONMENTS
+    ):
         return build_result(
             decision=DECISION_INVALID_PROMOTION_SEQUENCE,
             valid=False,
@@ -369,6 +867,36 @@ def validate_promotion(target_environment, release_id, artifact_hash, previous_m
                     "FAIL",
                     "dev, uat, or prod",
                     target_environment,
+                )
+            ],
+        )
+
+    identity_valid, identity_message = (
+        validate_promotion_identity(
+            release_id,
+            artifact_hash,
+        )
+    )
+
+    if not identity_valid:
+        return build_result(
+            decision=DECISION_INVALID_PROMOTION_SEQUENCE,
+            valid=False,
+            target_environment=target_environment,
+            release_id=release_id,
+            artifact_hash=artifact_hash,
+            previous_environment=previous_environment,
+            previous_manifest_path=previous_manifest_path,
+            message=identity_message,
+            checks=[
+                build_check(
+                    "promotion_identity_is_valid",
+                    "FAIL",
+                    (
+                        "valid release ID and "
+                        "artifact hash"
+                    ),
+                    identity_message,
                 )
             ],
         )
@@ -393,15 +921,38 @@ def validate_promotion(target_environment, release_id, artifact_hash, previous_m
             ],
         )
 
+    if previous_manifest_path is None:
+        return build_result(
+            decision=DECISION_PREVIOUS_MANIFEST_NOT_FOUND,
+            valid=False,
+            target_environment=target_environment,
+            release_id=release_id,
+            artifact_hash=artifact_hash,
+            previous_environment=previous_environment,
+            previous_manifest_path=None,
+            message=(
+                "Previous deployment manifest path "
+                "was not provided."
+            ),
+            checks=[
+                build_check(
+                    "previous_manifest_path_is_provided",
+                    "FAIL",
+                    "previous manifest path",
+                    None,
+                )
+            ],
+        )
+
     previous_manifest_path = Path(previous_manifest_path)
 
-    if not previous_manifest_path.exists():
+    if not previous_manifest_path.is_file():
         checks.append(
             build_check(
-                "previous_manifest_exists",
+                "previous_manifest_is_regular_file",
                 "FAIL",
-                "manifest file exists",
-                "manifest file not found",
+                "manifest path is a regular file",
+                "manifest file not found or not a file",
             )
         )
 
@@ -419,21 +970,23 @@ def validate_promotion(target_environment, release_id, artifact_hash, previous_m
 
     checks.append(
         build_check(
-            "previous_manifest_exists",
+            "previous_manifest_is_regular_file",
             "PASS",
-            "manifest file exists",
-            "manifest file found",
+            "manifest path is a regular file",
+            "manifest path is a regular file",
         )
     )
 
     try:
-        manifest = load_manifest(previous_manifest_path)
+        manifest = load_manifest(
+            previous_manifest_path
+        )
     except Exception as error:
         checks.append(
             build_check(
-                "previous_manifest_json_is_readable",
+                "previous_manifest_is_loadable",
                 "FAIL",
-                "valid JSON",
+                EXPECTED_LOADABLE_MANIFEST,
                 str(error),
             )
         )
@@ -446,16 +999,19 @@ def validate_promotion(target_environment, release_id, artifact_hash, previous_m
             artifact_hash=artifact_hash,
             previous_environment=previous_environment,
             previous_manifest_path=previous_manifest_path,
-            message="Previous deployment manifest could not be parsed.",
+            message=(
+                "Previous deployment manifest "
+                "could not be loaded."
+            ),
             checks=checks,
         )
 
     checks.append(
         build_check(
-            "previous_manifest_json_is_readable",
+            "previous_manifest_is_loadable",
             "PASS",
-            "valid JSON",
-            "valid JSON",
+            EXPECTED_LOADABLE_MANIFEST,
+            EXPECTED_LOADABLE_MANIFEST,
         )
     )
 
@@ -525,7 +1081,51 @@ def validate_promotion(target_environment, release_id, artifact_hash, previous_m
         )
     )
 
-    previous_operation_status = manifest["operation"]["status"]
+    previous_artifact_role = manifest[
+        "evidence_storage"
+    ]["artifact_role"]
+
+    if (
+        previous_artifact_role
+        != CANONICAL_EVIDENCE_ROLE
+    ):
+        checks.append(
+            build_check(
+                "previous_manifest_is_canonical",
+                "FAIL",
+                CANONICAL_EVIDENCE_ROLE,
+                previous_artifact_role,
+            )
+        )
+
+        return build_result(
+            decision=(
+                DECISION_PREVIOUS_MANIFEST_NOT_CANONICAL
+            ),
+            valid=False,
+            target_environment=target_environment,
+            release_id=release_id,
+            artifact_hash=artifact_hash,
+            previous_environment=previous_environment,
+            previous_manifest_path=previous_manifest_path,
+            message=(
+                "Historical deployment evidence cannot "
+                "authorize promotion."
+            ),
+            checks=checks,
+        )
+    checks.append(
+        build_check(
+            "previous_manifest_is_canonical",
+            "PASS",
+            CANONICAL_EVIDENCE_ROLE,
+            previous_artifact_role,
+        )
+    )
+
+    previous_operation_status = manifest[
+        "operation"
+    ]["status"]
 
     if previous_operation_status != SUCCESS_STATUS:
         checks.append(
@@ -538,14 +1138,17 @@ def validate_promotion(target_environment, release_id, artifact_hash, previous_m
         )
 
         return build_result(
-            decision=DECISION_PREVIOUS_DEPLOYMENT_NOT_SUCCESSFUL,
+            decision=DECISION_INVALID_MANIFEST_SCHEMA,
             valid=False,
             target_environment=target_environment,
             release_id=release_id,
             artifact_hash=artifact_hash,
             previous_environment=previous_environment,
             previous_manifest_path=previous_manifest_path,
-            message="Previous deployment was not successful.",
+            message=(
+                "Canonical deployment evidence must represent "
+                "a successful deployment."
+            ),
             checks=checks,
         )
 
@@ -557,7 +1160,7 @@ def validate_promotion(target_environment, release_id, artifact_hash, previous_m
             previous_operation_status,
         )
     )
-
+    
     previous_release_id = manifest["release"]["release_id"]
 
     if previous_release_id != release_id:
@@ -782,7 +1385,10 @@ def main():
             checks=input_checks,
         )
 
-        write_json_atomic(output_path, result)
+        write_validation_result_or_exit(
+            output_path,
+            result,
+        )
         print(result["decision"])
         return 1
 
@@ -798,7 +1404,10 @@ def main():
         previous_manifest_path=previous_manifest_path,
     )
 
-    write_json_atomic(output_path, result)
+    write_validation_result_or_exit(
+        output_path,
+        result,
+    )
     print(result["decision"])
 
     return 0 if result["valid"] else 1
